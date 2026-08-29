@@ -1,0 +1,109 @@
+arm_controllers:
+  type: position_controllers/JointTrajectoryController
+  joints:
+    - joint1
+    - joint2
+    - joint3
+    - joint4
+    - joint5
+    - joint6
+  constraints:
+    goal_time: 1.0
+    stopped_velocity_tolerance: 0.1
+    joint1: {trajectory: 0.05, goal: 0.01}
+    joint2: {trajectory: 0.05, goal: 0.01}
+    joint3: {trajectory: 0.05, goal: 0.01}
+    joint4: {trajectory: 0.05, goal: 0.01}
+    joint5: {trajectory: 0.05, goal: 0.01}
+    joint6: {trajectory: 0.05, goal: 0.01}
+  gains:
+    joint1:
+      p: 100
+      d: 1
+      i: 1
+      i_clamp: 1
+    joint2:
+      p: 100
+      d: 1
+      i: 1
+      i_clamp: 1
+    joint3:
+      p: 100
+      d: 1
+      i: 1
+      i_clamp: 1
+    joint4:
+      p: 100
+      d: 1
+      i: 1
+      i_clamp: 1
+    joint5:
+      p: 100
+      d: 1
+      i: 1
+      i_clamp: 1
+    joint6:
+      p: 100
+      d: 1
+      i: 1
+      i_clamp: 1
+gripper_controller:
+  type: position_controllers/JointTrajectoryController
+  joints:
+    - joint7
+  constraints:
+    goal_time: 1.0
+    stopped_velocity_tolerance: 0.1
+    joint7: {trajectory: 0.01, goal: 0.002}
+  gains:
+    joint7:
+      p: 100
+      d: 1
+      i: 1
+      i_clamp: 1
+piper_controller:
+  type: position_controllers/JointTrajectoryController
+  joints:
+    - joint1
+    - joint2
+    - joint3
+    - joint4
+    - joint5
+    - joint6
+    - joint7
+  gains:
+    joint1:
+      p: 100
+      d: 1
+      i: 1
+      i_clamp: 1
+    joint2:
+      p: 100
+      d: 1
+      i: 1
+      i_clamp: 1
+    joint3:
+      p: 100
+      d: 1
+      i: 1
+      i_clamp: 1
+    joint4:
+      p: 100
+      d: 1
+      i: 1
+      i_clamp: 1
+    joint5:
+      p: 100
+      d: 1
+      i: 1
+      i_clamp: 1
+    joint6:
+      p: 100
+      d: 1
+      i: 1
+      i_clamp: 1
+    joint7:
+      p: 100
+      d: 1
+      i: 1
+      i_clamp: 1

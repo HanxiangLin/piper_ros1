@@ -1,7 +1,0 @@
-piper_ros/src/piper_sim/piper_mujoco
-/home/hank/piper_ws/devel/.private/piper_mujoco/share/piper_mujoco/cmake/piper_mujocoConfig.cmake /home/hank/piper_ws/devel/share/piper_mujoco/cmake/piper_mujocoConfig.cmake
-/home/hank/piper_ws/devel/.private/piper_mujoco/share/piper_mujoco/cmake/piper_mujocoConfig-version.cmake /home/hank/piper_ws/devel/share/piper_mujoco/cmake/piper_mujocoConfig-version.cmake
-/home/hank/piper_ws/devel/.private/piper_mujoco/lib/piper_mujoco/piper_mujoco_ros.py /home/hank/piper_ws/devel/lib/piper_mujoco/piper_mujoco_ros.py
-/home/hank/piper_ws/devel/.private/piper_mujoco/lib/piper_mujoco/piper_no_gripper_mujoco_ros.py /home/hank/piper_ws/devel/lib/piper_mujoco/piper_no_gripper_mujoco_ros.py
-/home/hank/piper_ws/devel/.private/piper_mujoco/lib/piper_mujoco/piper_mujoco_pid.py /home/hank/piper_ws/devel/lib/piper_mujoco/piper_mujoco_pid.py
-/home/hank/piper_ws/devel/.private/piper_mujoco/lib/pkgconfig/piper_mujoco.pc /home/hank/piper_ws/devel/lib/pkgconfig/piper_mujoco.pc

@@ -1,8 +1,0 @@
-prefix=/home/hank/piper_ws/install
-
-Name: piper_description
-Description: Description of piper_description
-Version: 1.0.0
-Cflags: 
-Libs: -L${prefix}/lib 
-Requires: 

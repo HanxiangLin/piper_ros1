@@ -1,0 +1,32 @@
+# Local tooling and nested-repository history backups
+/.agents/
+/.codex/
+/.nested-git-backups/
+
+# ROS/catkin generated artifacts
+/.catkin_tools/
+/build/
+/devel/
+/install/
+/logs/
+/log/
+
+# Runtime outputs
+/inference/
+/camera_debug.jpg
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.env
+.env.*
+.venv/
+venv/
+
+# Editor and OS metadata
+.vscode/
+.idea/
+.DS_Store
+
+# Large upstream model handled outside regular Git
+/src/realsense-D455-YOLOV5/weights/yolov5x.pt

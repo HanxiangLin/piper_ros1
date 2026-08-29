@@ -1,1 +1,0 @@
-/home/hank/piper_ws/devel/.private/piper_x_description/lib/pkgconfig/piper_x_description.pc

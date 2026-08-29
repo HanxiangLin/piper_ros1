@@ -1,4 +1,0 @@
-piper_ros/src/piper_x_description
-/home/hank/piper_ws/devel/.private/piper_x_description/share/piper_x_description/cmake/piper_x_descriptionConfig-version.cmake /home/hank/piper_ws/devel/share/piper_x_description/cmake/piper_x_descriptionConfig-version.cmake
-/home/hank/piper_ws/devel/.private/piper_x_description/share/piper_x_description/cmake/piper_x_descriptionConfig.cmake /home/hank/piper_ws/devel/share/piper_x_description/cmake/piper_x_descriptionConfig.cmake
-/home/hank/piper_ws/devel/.private/piper_x_description/lib/pkgconfig/piper_x_description.pc /home/hank/piper_ws/devel/lib/pkgconfig/piper_x_description.pc

@@ -1,1 +1,0 @@
-/home/hank/piper_ws/devel/.private/piper_no_gripper_moveit/share/piper_no_gripper_moveit/cmake/piper_no_gripper_moveitConfig.cmake

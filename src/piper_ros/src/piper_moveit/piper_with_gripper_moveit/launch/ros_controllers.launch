@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<launch>
+
+  <!-- Load joint controller configurations from YAML file to parameter server -->
+  <rosparam file="$(find piper_with_gripper_moveit)/config/ros_controllers.yaml" command="load"/>
+
+  <!-- Load only non-overlapping controllers. piper_controller claims the
+       same joints as both controllers below and cannot run alongside them. -->
+  <node name="controller_spawner" pkg="controller_manager" type="spawner" respawn="false"
+    output="screen" args="arm_controllers gripper_controller"/>
+
+</launch>

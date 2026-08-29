@@ -1,1 +1,0 @@
-/home/hank/piper_ws/devel/.private/moveit_ctrl/share/roseus/ros/moveit_ctrl/manifest.l

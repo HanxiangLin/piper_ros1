@@ -1,8 +1,0 @@
-prefix=/home/hank/piper_ws/install
-
-Name: piper_mujoco
-Description: Description of piper_mujoco
-Version: 0.0.0
-Cflags: 
-Libs: -L${prefix}/lib 
-Requires: rospy std_msgs

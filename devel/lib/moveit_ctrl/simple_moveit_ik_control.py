@@ -1,1 +1,0 @@
-/home/hank/piper_ws/devel/.private/moveit_ctrl/lib/moveit_ctrl/simple_moveit_ik_control.py
