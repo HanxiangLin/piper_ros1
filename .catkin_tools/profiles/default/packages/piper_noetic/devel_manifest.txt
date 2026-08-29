@@ -1,0 +1,4 @@
+piper_ros/src/piper_noetic
+/home/hank/piper_ws/devel/.private/piper_noetic/share/piper_noetic/cmake/piper_noeticConfig.cmake /home/hank/piper_ws/devel/share/piper_noetic/cmake/piper_noeticConfig.cmake
+/home/hank/piper_ws/devel/.private/piper_noetic/share/piper_noetic/cmake/piper_noeticConfig-version.cmake /home/hank/piper_ws/devel/share/piper_noetic/cmake/piper_noeticConfig-version.cmake
+/home/hank/piper_ws/devel/.private/piper_noetic/lib/pkgconfig/piper_noetic.pc /home/hank/piper_ws/devel/lib/pkgconfig/piper_noetic.pc

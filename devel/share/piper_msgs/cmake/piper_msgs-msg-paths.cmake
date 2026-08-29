@@ -1,0 +1,1 @@
+/home/hank/piper_ws/devel/.private/piper_msgs/share/piper_msgs/cmake/piper_msgs-msg-paths.cmake

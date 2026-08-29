@@ -1,0 +1,86 @@
+[35m[1mScanning dependencies of target actionlib_msgs_generate_messages_cpp[0m
+[35m[1mScanning dependencies of target std_msgs_generate_messages_cpp[0m
+[35m[1mScanning dependencies of target _piper_msgs_generate_messages_check_deps_PiperStatusMsg[0m
+[35m[1mScanning dependencies of target _piper_msgs_generate_messages_check_deps_Enable[0m
+[35m[1mScanning dependencies of target _piper_msgs_generate_messages_check_deps_GoZero[0m
+[  0%] Built target actionlib_msgs_generate_messages_cpp
+[  0%] Built target std_msgs_generate_messages_cpp
+[35m[1mScanning dependencies of target _piper_msgs_generate_messages_check_deps_Gripper[0m
+[35m[1mScanning dependencies of target _piper_msgs_generate_messages_check_deps_PiperEulerPose[0m
+[  0%] Built target _piper_msgs_generate_messages_check_deps_PiperStatusMsg
+[  0%] Built target _piper_msgs_generate_messages_check_deps_Enable
+[  0%] Built target _piper_msgs_generate_messages_check_deps_GoZero
+[35m[1mScanning dependencies of target _piper_msgs_generate_messages_check_deps_PosCmd[0m
+[35m[1mScanning dependencies of target std_msgs_generate_messages_py[0m
+[35m[1mScanning dependencies of target actionlib_msgs_generate_messages_py[0m
+[  0%] Built target _piper_msgs_generate_messages_check_deps_PiperEulerPose
+[  0%] Built target std_msgs_generate_messages_py
+[  0%] Built target _piper_msgs_generate_messages_check_deps_Gripper
+[  0%] Built target actionlib_msgs_generate_messages_py
+[35m[1mScanning dependencies of target actionlib_msgs_generate_messages_nodejs[0m
+[35m[1mScanning dependencies of target std_msgs_generate_messages_nodejs[0m
+[35m[1mScanning dependencies of target actionlib_msgs_generate_messages_lisp[0m
+[35m[1mScanning dependencies of target std_msgs_generate_messages_lisp[0m
+[  0%] Built target actionlib_msgs_generate_messages_nodejs
+[  0%] Built target std_msgs_generate_messages_nodejs
+[  0%] Built target std_msgs_generate_messages_lisp
+[  0%] Built target actionlib_msgs_generate_messages_lisp
+[35m[1mScanning dependencies of target actionlib_msgs_generate_messages_eus[0m
+[35m[1mScanning dependencies of target std_msgs_generate_messages_eus[0m
+[  0%] Built target actionlib_msgs_generate_messages_eus
+[  0%] Built target std_msgs_generate_messages_eus
+[  0%] Built target _piper_msgs_generate_messages_check_deps_PosCmd
+[35m[1mScanning dependencies of target piper_msgs_generate_messages_cpp[0m
+[35m[1mScanning dependencies of target piper_msgs_generate_messages_py[0m
+[35m[1mScanning dependencies of target piper_msgs_generate_messages_lisp[0m
+[35m[1mScanning dependencies of target piper_msgs_generate_messages_nodejs[0m
+[35m[1mScanning dependencies of target piper_msgs_generate_messages_eus[0m
+[  9%] [34m[1mGenerating Python from MSG piper_msgs/PiperStatusMsg[0m
+[  9%] [34m[1mGenerating EusLisp code from piper_msgs/PiperStatusMsg.msg[0m
+[  9%] [34m[1mGenerating Lisp code from piper_msgs/PiperStatusMsg.msg[0m
+[ 12%] [34m[1mGenerating Javascript code from piper_msgs/PiperStatusMsg.msg[0m
+[ 15%] [34m[1mGenerating C++ code from piper_msgs/PiperStatusMsg.msg[0m
+Traceback (most recent call last):
+  File "/opt/ros/noetic/share/gencpp/cmake/../../../lib/gencpp/gen_cpp.py", line 49, in <module>
+    genmsg.template_tools.generate_from_command_line_options(
+  File "/opt/ros/noetic/lib/python3/dist-packages/genmsg/template_tools.py", line 213, in generate_from_command_line_options
+    generate_from_file(argv[1], options.package, options.outdir, options.emdir, options.includepath, msg_template_dict, srv_template_dict)
+  File "/opt/ros/noetic/lib/python3/dist-packages/genmsg/template_tools.py", line 154, in generate_from_file
+    _generate_msg_from_file(input_file, output_dir, template_dir, search_path, package_name, msg_template_dict)
+  File "/opt/ros/noetic/lib/python3/dist-packages/genmsg/template_tools.py", line 93, in _generate_msg_from_file
+    _generate_from_spec(input_file,
+  File "/opt/ros/noetic/lib/python3/dist-packages/genmsg/template_tools.py", line 77, in _generate_from_spec
+    interpreter = em.Interpreter(output=ofile, globals=g, options={em.RAW_OPT:True,em.BUFFERED_OPT:True})
+AttributeError: module 'em' has no attribute 'RAW_OPT'
+make[2]: *** [CMakeFiles/piper_msgs_generate_messages_cpp.dir/build.make:68：/home/hank/piper_ws/devel/.private/piper_msgs/include/piper_msgs/PiperStatusMsg.h] 错误 1
+make[2]: *** 正在删除文件“/home/hank/piper_ws/devel/.private/piper_msgs/include/piper_msgs/PiperStatusMsg.h”
+make[1]: *** [CMakeFiles/Makefile2:1263：CMakeFiles/piper_msgs_generate_messages_cpp.dir/all] 错误 2
+make[1]: *** 正在等待未完成的任务....
+[ 18%] [34m[1mGenerating Lisp code from piper_msgs/PosCmd.msg[0m
+[ 21%] [34m[1mGenerating Javascript code from piper_msgs/PosCmd.msg[0m
+[ 24%] [34m[1mGenerating Lisp code from piper_msgs/PiperEulerPose.msg[0m
+[ 27%] [34m[1mGenerating EusLisp code from piper_msgs/PosCmd.msg[0m
+[ 30%] [34m[1mGenerating Python from MSG piper_msgs/PosCmd[0m
+[ 36%] [34m[1mGenerating Javascript code from piper_msgs/PiperEulerPose.msg[0m
+[ 36%] [34m[1mGenerating Lisp code from piper_msgs/Enable.srv[0m
+[ 39%] [34m[1mGenerating Javascript code from piper_msgs/Enable.srv[0m
+[ 42%] [34m[1mGenerating Lisp code from piper_msgs/Gripper.srv[0m
+[ 45%] [34m[1mGenerating Javascript code from piper_msgs/Gripper.srv[0m
+[ 48%] [34m[1mGenerating EusLisp code from piper_msgs/PiperEulerPose.msg[0m
+[ 51%] [34m[1mGenerating EusLisp code from piper_msgs/Enable.srv[0m
+[ 54%] [34m[1mGenerating Lisp code from piper_msgs/GoZero.srv[0m
+[ 57%] [34m[1mGenerating Javascript code from piper_msgs/GoZero.srv[0m
+[ 60%] [34m[1mGenerating Python from MSG piper_msgs/PiperEulerPose[0m
+[ 60%] Built target piper_msgs_generate_messages_nodejs
+[ 60%] Built target piper_msgs_generate_messages_lisp
+[ 63%] [34m[1mGenerating EusLisp code from piper_msgs/Gripper.srv[0m
+[ 66%] [34m[1mGenerating EusLisp code from piper_msgs/GoZero.srv[0m
+[ 69%] [34m[1mGenerating EusLisp manifest code for piper_msgs[0m
+[ 72%] [34m[1mGenerating Python code from SRV piper_msgs/Enable[0m
+[ 75%] [34m[1mGenerating Python code from SRV piper_msgs/Gripper[0m
+[ 78%] [34m[1mGenerating Python code from SRV piper_msgs/GoZero[0m
+[ 81%] [34m[1mGenerating Python msg __init__.py for piper_msgs[0m
+[ 84%] [34m[1mGenerating Python srv __init__.py for piper_msgs[0m
+[ 84%] Built target piper_msgs_generate_messages_py
+[ 84%] Built target piper_msgs_generate_messages_eus
+make: *** [Makefile:141：all] 错误 2

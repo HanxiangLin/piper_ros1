@@ -1,0 +1,4 @@
+piper_ros/src/piper
+/home/hank/piper_ws/devel/.private/piper/share/piper/cmake/piperConfig.cmake /home/hank/piper_ws/devel/share/piper/cmake/piperConfig.cmake
+/home/hank/piper_ws/devel/.private/piper/share/piper/cmake/piperConfig-version.cmake /home/hank/piper_ws/devel/share/piper/cmake/piperConfig-version.cmake
+/home/hank/piper_ws/devel/.private/piper/lib/pkgconfig/piper.pc /home/hank/piper_ws/devel/lib/pkgconfig/piper.pc

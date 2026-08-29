@@ -1,0 +1,1 @@
+/home/hank/piper_ws/devel/.private/piper_msgs/share/roseus/ros/piper_msgs/msg/PosCmd.l

@@ -1,0 +1,8 @@
+prefix=/home/hank/piper_ws/devel/.private/moveit_ctrl
+
+Name: moveit_ctrl
+Description: Description of moveit_ctrl
+Version: 0.0.0
+Cflags: -I/home/hank/piper_ws/devel/.private/moveit_ctrl/include
+Libs: -L${prefix}/lib 
+Requires: moveit_msgs roscpp rospy moveit_ros_planning_interface sensor_msgs message_runtime

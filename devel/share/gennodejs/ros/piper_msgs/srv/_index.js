@@ -1,0 +1,1 @@
+/home/hank/piper_ws/devel/.private/piper_msgs/share/gennodejs/ros/piper_msgs/srv/_index.js

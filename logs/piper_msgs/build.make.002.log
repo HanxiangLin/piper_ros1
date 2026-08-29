@@ -1,0 +1,22 @@
+[  0%] Built target std_msgs_generate_messages_cpp
+[  0%] Built target _piper_msgs_generate_messages_check_deps_GoZero
+[  0%] Built target _piper_msgs_generate_messages_check_deps_PiperStatusMsg
+[  0%] Built target _piper_msgs_generate_messages_check_deps_Enable
+[  0%] Built target actionlib_msgs_generate_messages_cpp
+[  0%] Built target std_msgs_generate_messages_py
+[  0%] Built target _piper_msgs_generate_messages_check_deps_PiperEulerPose
+[  0%] Built target actionlib_msgs_generate_messages_py
+[  0%] Built target _piper_msgs_generate_messages_check_deps_PosCmd
+[  0%] Built target _piper_msgs_generate_messages_check_deps_Gripper
+[  0%] Built target std_msgs_generate_messages_nodejs
+[  0%] Built target actionlib_msgs_generate_messages_nodejs
+[  0%] Built target actionlib_msgs_generate_messages_lisp
+[  0%] Built target std_msgs_generate_messages_lisp
+[  0%] Built target std_msgs_generate_messages_eus
+[  0%] Built target actionlib_msgs_generate_messages_eus
+[ 18%] Built target piper_msgs_generate_messages_cpp
+[ 42%] Built target piper_msgs_generate_messages_py
+[ 78%] Built target piper_msgs_generate_messages_lisp
+[ 78%] Built target piper_msgs_generate_messages_nodejs
+[100%] Built target piper_msgs_generate_messages_eus
+[100%] Built target piper_msgs_generate_messages

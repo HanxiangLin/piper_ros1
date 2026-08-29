@@ -1,0 +1,3 @@
+Symlinking /home/hank/piper_ws/devel/share/piper/cmake/piperConfig.cmake
+Symlinking /home/hank/piper_ws/devel/share/piper/cmake/piperConfig-version.cmake
+Symlinking /home/hank/piper_ws/devel/lib/pkgconfig/piper.pc

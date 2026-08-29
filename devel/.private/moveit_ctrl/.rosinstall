@@ -1,0 +1,2 @@
+- setup-file:
+    local-name: /home/hank/piper_ws/devel/.private/moveit_ctrl/setup.sh

@@ -1,0 +1,1 @@
+/home/hank/piper_ws/devel/.private/piper_msgs/share/common-lisp/ros/piper_msgs/srv/piper_msgs-srv.asd

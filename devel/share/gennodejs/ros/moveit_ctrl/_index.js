@@ -1,0 +1,1 @@
+/home/hank/piper_ws/devel/.private/moveit_ctrl/share/gennodejs/ros/moveit_ctrl/_index.js

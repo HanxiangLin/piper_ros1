@@ -1,0 +1,4 @@
+piper_ros/src/piper_moveit/piper_with_gripper_moveit
+/home/hank/piper_ws/devel/.private/piper_with_gripper_moveit/share/piper_with_gripper_moveit/cmake/piper_with_gripper_moveitConfig.cmake /home/hank/piper_ws/devel/share/piper_with_gripper_moveit/cmake/piper_with_gripper_moveitConfig.cmake
+/home/hank/piper_ws/devel/.private/piper_with_gripper_moveit/share/piper_with_gripper_moveit/cmake/piper_with_gripper_moveitConfig-version.cmake /home/hank/piper_ws/devel/share/piper_with_gripper_moveit/cmake/piper_with_gripper_moveitConfig-version.cmake
+/home/hank/piper_ws/devel/.private/piper_with_gripper_moveit/lib/pkgconfig/piper_with_gripper_moveit.pc /home/hank/piper_ws/devel/lib/pkgconfig/piper_with_gripper_moveit.pc
