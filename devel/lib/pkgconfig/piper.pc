@@ -1,1 +1,0 @@
-/home/hank/piper_ws/devel/.private/piper/lib/pkgconfig/piper.pc

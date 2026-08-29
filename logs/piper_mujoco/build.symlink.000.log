@@ -1,6 +1,0 @@
-Symlinking /home/hank/piper_ws/devel/share/piper_mujoco/cmake/piper_mujocoConfig.cmake
-Symlinking /home/hank/piper_ws/devel/share/piper_mujoco/cmake/piper_mujocoConfig-version.cmake
-Symlinking /home/hank/piper_ws/devel/lib/piper_mujoco/piper_mujoco_ros.py
-Symlinking /home/hank/piper_ws/devel/lib/piper_mujoco/piper_no_gripper_mujoco_ros.py
-Symlinking /home/hank/piper_ws/devel/lib/piper_mujoco/piper_mujoco_pid.py
-Symlinking /home/hank/piper_ws/devel/lib/pkgconfig/piper_mujoco.pc

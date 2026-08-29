@@ -1,1 +1,0 @@
-/home/hank/piper_ws/devel/.private/piper_description/share/piper_description/cmake/piper_descriptionConfig-version.cmake

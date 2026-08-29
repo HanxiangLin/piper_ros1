@@ -1,1 +1,0 @@
-/home/hank/piper_ws/devel/.private/piper_msgs/share/common-lisp/ros/piper_msgs/srv/_package.lisp

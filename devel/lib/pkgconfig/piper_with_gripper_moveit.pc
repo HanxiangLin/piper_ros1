@@ -1,1 +1,0 @@
-/home/hank/piper_ws/devel/.private/piper_with_gripper_moveit/lib/pkgconfig/piper_with_gripper_moveit.pc
