@@ -27,6 +27,3 @@ venv/
 .vscode/
 .idea/
 .DS_Store
-
-# Large upstream model handled outside regular Git
-/src/realsense-D455-YOLOV5/weights/yolov5x.pt
