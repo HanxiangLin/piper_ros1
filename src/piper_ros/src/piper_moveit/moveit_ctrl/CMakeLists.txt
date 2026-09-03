@@ -39,5 +39,6 @@ catkin_install_python(PROGRAMS
   scripts/simple_moveit_control.py
   scripts/simple_moveit_ik_control.py
   scripts/moveit_draw_circle.py
+  scripts/moveit_three_segments.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

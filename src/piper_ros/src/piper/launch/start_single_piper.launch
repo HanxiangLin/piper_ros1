@@ -2,6 +2,11 @@
   <arg name="can_port" default="can0" />
   <arg name="auto_enable" default="true" />
   <arg name="gripper_val_mutiple" default="1" />
+  <!-- Legacy mode uses /joint_states as a command topic.  A standard MoveIt
+       real-robot launch overrides these two args to separate command/feedback. -->
+  <arg name="joint_command_topic" default="/joint_states" />
+  <arg name="gripper_command_topic" default="/gripper_ctrl_single" />
+  <arg name="joint_feedback_topic" default="/joint_states_single" />
   <!-- <include file="$(find piper_description)/launch/display_xacro.launch"/> -->
   <!-- 启动机械臂节点 -->
   <node name="piper_ctrl_single_node" pkg="piper" type="piper_ctrl_single_node.py" output="screen">
@@ -9,7 +14,9 @@
     <param name="auto_enable" value="$(arg auto_enable)" />
     <param name="gripper_val_mutiple" value="$(arg gripper_val_mutiple)" />
     <!-- <param name="rviz_ctrl_flag" value="true" /> -->
-    <param name="girpper_exist" value="true" />
-    <remap from="joint_ctrl_single" to="/joint_states" />
+    <param name="gripper_exist" value="true" />
+    <remap from="joint_ctrl_single" to="$(arg joint_command_topic)" />
+    <remap from="gripper_ctrl_single" to="$(arg gripper_command_topic)" />
+    <remap from="joint_states_single" to="$(arg joint_feedback_topic)" />
   </node>
 </launch>

@@ -100,16 +100,29 @@ class C_PiperRosNode():
         self.block_arm_service = rospy.Service('block_arm', SetBool, self.handle_block_arm_service)
         # joint
         self.joint_states = JointState()
-        self.joint_states.name = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6', 'gripper']
-        self.joint_states.position = [0.0] * 7
-        self.joint_states.velocity = [0.0] * 7
-        self.joint_states.effort = [0.0] * 7
+        # URDF/MoveIt 使用 joint7、joint8 表示左右两个夹指。SDK 的
+        # grippers_angle 是两个夹指之间的完整开口量，因此反馈时各取一半。
+        self.joint_states.name = [
+            'joint1', 'joint2', 'joint3', 'joint4',
+            'joint5', 'joint6', 'joint7', 'joint8'
+        ]
+        self.joint_states.position = [0.0] * 8
+        self.joint_states.velocity = [0.0] * 8
+        self.joint_states.effort = [0.0] * 8
         
         # 创建piper类并打开can接口
         self.piper = C_PiperInterface(can_name=self.can_port)
         self.piper.ConnectPort()
         self.piper.MotionCtrl_2(0x01, 0x01, 30,0)
         self.block_ctrl_flag = False
+        # 标准 MoveIt 夹爪控制使用独立话题，避免单关节命令被六轴回调误解析。
+        self.gripper_command_subscriber = rospy.Subscriber(
+            'gripper_ctrl_single',
+            JointState,
+            self.gripper_callback,
+            queue_size=1,
+            tcp_nodelay=True,
+        )
         # 启动订阅线程
         sub_pos_th = threading.Thread(target=self.SubPosThread)
         sub_pos_th.daemon = True
@@ -204,7 +217,9 @@ class C_PiperRosNode():
         joint_3:float = (self.piper.GetArmJointMsgs().joint_state.joint_4/1000) * 0.017444
         joint_4:float = (self.piper.GetArmJointMsgs().joint_state.joint_5/1000) * 0.017444
         joint_5:float = (self.piper.GetArmJointMsgs().joint_state.joint_6/1000) * 0.017444
-        joint_6:float = self.piper.GetArmGripperMsgs().gripper_state.grippers_angle/1000000
+        gripper_opening:float = self.piper.GetArmGripperMsgs().gripper_state.grippers_angle/1000000
+        joint_6:float = max(0.0, min(gripper_opening / 2.0, 0.035))
+        joint_7:float = -joint_6
         vel_0:float = self.piper.GetArmHighSpdInfoMsgs().motor_1.motor_speed/1000
         vel_1:float = self.piper.GetArmHighSpdInfoMsgs().motor_2.motor_speed/1000
         vel_2:float = self.piper.GetArmHighSpdInfoMsgs().motor_3.motor_speed/1000
@@ -219,9 +234,17 @@ class C_PiperRosNode():
         effort_5:float = self.piper.GetArmHighSpdInfoMsgs().motor_6.effort/1000
         effort_6:float = self.piper.GetArmGripperMsgs().gripper_state.grippers_effort/1000
         self.joint_states.header.stamp = rospy.Time.now()
-        self.joint_states.position = [joint_0,joint_1, joint_2, joint_3, joint_4, joint_5,joint_6]
-        self.joint_states.velocity = [vel_0, vel_1, vel_2, vel_3, vel_4, vel_5, 0.0]
-        self.joint_states.effort = [effort_0, effort_1, effort_2, effort_3, effort_4, effort_5, effort_6]
+        self.joint_states.position = [
+            joint_0, joint_1, joint_2, joint_3,
+            joint_4, joint_5, joint_6, joint_7
+        ]
+        self.joint_states.velocity = [
+            vel_0, vel_1, vel_2, vel_3, vel_4, vel_5, 0.0, 0.0
+        ]
+        self.joint_states.effort = [
+            effort_0, effort_1, effort_2, effort_3,
+            effort_4, effort_5, effort_6, effort_6
+        ]
         # 发布所有消息
         self.joint_pub.publish(self.joint_states)
     
@@ -392,6 +415,40 @@ class C_PiperRosNode():
                         self.piper.GripperCtrl(abs(joint_6), gripper_effort, 0x01, 0)
                     # 默认1N
                     else: self.piper.GripperCtrl(abs(joint_6), 1000, 0x01, 0)
+
+    def gripper_callback(self, joint_data):
+        """接收 MoveIt 的 joint7 单指位置并转换为 Piper 完整夹爪开口量。"""
+        if self.block_ctrl_flag or not self.gripper_exist:
+            return
+        if not joint_data.position:
+            rospy.logwarn_throttle(2.0, "忽略不含 position 的夹爪命令")
+            return
+
+        if joint_data.name:
+            positions = dict(zip(joint_data.name, joint_data.position))
+            if 'joint7' not in positions:
+                rospy.logwarn_throttle(2.0, "夹爪命令缺少 joint7")
+                return
+            finger_position = positions['joint7']
+            joint_index = joint_data.name.index('joint7')
+        else:
+            finger_position = joint_data.position[0]
+            joint_index = 0
+
+        finger_position = max(0.0, min(float(finger_position), 0.035))
+        gripper_opening = round(
+            finger_position * 1000 * 1000 * self.gripper_val_mutiple
+        )
+
+        gripper_effort = 1000
+        if len(joint_data.effort) > joint_index:
+            effort = max(0.5, min(float(joint_data.effort[joint_index]), 3.0))
+            gripper_effort = round(effort * 1000)
+
+        if self.GetEnableFlag():
+            self.piper.GripperCtrl(gripper_opening, gripper_effort, 0x01, 0)
+        else:
+            rospy.logwarn_throttle(2.0, "机械臂尚未使能，忽略夹爪轨迹命令")
     
     def enable_callback(self, enable_flag:Bool):
         """机械臂使能回调函数

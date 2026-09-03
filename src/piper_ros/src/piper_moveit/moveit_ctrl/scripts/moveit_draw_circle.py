@@ -36,7 +36,7 @@ def read_parameters():
         rospy.get_param("~require_hardware_feedback", execute)
     )
     hardware_feedback_topic = str(
-        rospy.get_param("~hardware_feedback_topic", "/joint_states_single")
+        rospy.get_param("~hardware_feedback_topic", "/joint_states")
     )
     hardware_tolerance = float(rospy.get_param("~hardware_tolerance", 0.05))
 

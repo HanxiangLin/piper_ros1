@@ -1,0 +1,67 @@
+<launch>
+  <arg name="can_port" default="can0" />
+  <arg name="auto_enable" default="true" />
+  <!-- joint7 是单指行程，Piper SDK 使用完整夹爪开口量，因此乘 2。 -->
+  <arg name="gripper_val_mutiple" default="2" />
+  <arg name="use_rviz" default="true" />
+
+  <arg name="command_topic" default="/joint_ctrl_single" />
+  <arg name="gripper_command_topic" default="/gripper_ctrl_single" />
+  <arg name="feedback_topic" default="/joint_states" />
+  <arg name="control_rate" default="50.0" />
+  <arg name="path_tolerance" default="0.50" />
+  <arg name="goal_tolerance" default="0.03" />
+  <arg name="goal_time_tolerance" default="5.0" />
+  <arg name="start_tolerance" default="0.10" />
+
+  <!-- Piper CAN driver: commands and measured state are intentionally separate. -->
+  <include file="$(find piper)/launch/start_single_piper.launch">
+    <arg name="can_port" value="$(arg can_port)" />
+    <arg name="auto_enable" value="$(arg auto_enable)" />
+    <arg name="gripper_val_mutiple" value="$(arg gripper_val_mutiple)" />
+    <arg name="joint_command_topic" value="$(arg command_topic)" />
+    <arg name="gripper_command_topic" value="$(arg gripper_command_topic)" />
+    <arg name="joint_feedback_topic" value="$(arg feedback_topic)" />
+  </include>
+
+  <node name="piper_arm_trajectory_controller"
+        pkg="piper"
+        type="piper_follow_joint_trajectory_server.py"
+        output="screen">
+    <param name="action_name" value="/arm_controllers/follow_joint_trajectory" />
+    <param name="command_topic" value="$(arg command_topic)" />
+    <param name="feedback_topic" value="$(arg feedback_topic)" />
+    <param name="control_rate" value="$(arg control_rate)" />
+    <param name="default_path_tolerance" value="$(arg path_tolerance)" />
+    <param name="default_goal_tolerance" value="$(arg goal_tolerance)" />
+    <param name="default_goal_time_tolerance" value="$(arg goal_time_tolerance)" />
+    <param name="start_tolerance" value="$(arg start_tolerance)" />
+  </node>
+
+  <node name="piper_gripper_trajectory_controller"
+        pkg="piper"
+        type="piper_follow_joint_trajectory_server.py"
+        output="screen">
+    <param name="action_name" value="/gripper_controller/follow_joint_trajectory" />
+    <param name="command_topic" value="$(arg gripper_command_topic)" />
+    <param name="feedback_topic" value="$(arg feedback_topic)" />
+    <rosparam param="joints">[joint7]</rosparam>
+    <param name="control_rate" value="$(arg control_rate)" />
+    <param name="default_path_tolerance" value="0.01" />
+    <param name="default_goal_tolerance" value="0.002" />
+    <param name="default_goal_time_tolerance" value="$(arg goal_time_tolerance)" />
+    <param name="start_tolerance" value="0.01" />
+  </node>
+
+  <!-- In real/simple mode demo.launch does not create this publisher. -->
+  <node name="robot_state_publisher"
+        pkg="robot_state_publisher"
+        type="robot_state_publisher"
+        respawn="true"
+        output="screen" />
+
+  <include file="$(find piper_with_gripper_moveit)/launch/demo.launch">
+    <arg name="moveit_controller_manager" value="piper_real" />
+    <arg name="use_rviz" value="$(arg use_rviz)" />
+  </include>
+</launch>

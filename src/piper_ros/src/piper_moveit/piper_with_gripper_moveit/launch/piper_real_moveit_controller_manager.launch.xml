@@ -1,0 +1,11 @@
+<launch>
+  <param name="moveit_controller_manager"
+         value="moveit_simple_controller_manager/MoveItSimpleControllerManager" />
+  <rosparam file="$(find piper_with_gripper_moveit)/config/piper_real_moveit_controllers.yaml" />
+
+  <!-- Permit the hardware bridge a short feedback-based settling interval after
+       the planned duration instead of having MoveIt cancel it immediately. -->
+  <param name="trajectory_execution/allowed_execution_duration_scaling" value="1.5" />
+  <param name="trajectory_execution/allowed_goal_duration_margin" value="5.0" />
+</launch>
+
