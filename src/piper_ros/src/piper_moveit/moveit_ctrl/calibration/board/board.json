@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "board_type": "aruco_grid",
+  "dictionary": "DICT_4X4_50",
+  "markers_x": 4,
+  "markers_y": 3,
+  "marker_length": 0.035,
+  "separation": 0.008,
+  "first_id": 0,
+  "min_markers": 4,
+  "max_reprojection_error_px": 2.0,
+  "width_m": 0.164,
+  "height_m": 0.12100000000000001,
+  "frame_convention": "top_left_x_right_y_down_z_into_paper"
+}

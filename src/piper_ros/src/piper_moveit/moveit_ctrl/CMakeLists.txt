@@ -12,6 +12,8 @@ find_package(catkin REQUIRED COMPONENTS
   rospy
 )
 
+catkin_python_setup()
+
 # 添加服务文件
 add_service_files(
   FILES
@@ -40,5 +42,15 @@ catkin_install_python(PROGRAMS
   scripts/simple_moveit_ik_control.py
   scripts/moveit_draw_circle.py
   scripts/moveit_three_segments.py
+  scripts/eye_to_hand_make_board.py
+  scripts/eye_to_hand_collect.py
+  scripts/eye_to_hand_solve.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
+install(DIRECTORY launch calibration
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+)
+install(FILES EYE_TO_HAND_D435I.md
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )

@@ -1,0 +1,23 @@
+<launch>
+  <!-- D435i acquisition only: this launch never starts or enables the arm. -->
+  <arg name="serial_no" default="" />
+  <arg name="camera" default="camera" />
+  <arg name="enable_pointcloud" default="false" />
+  <include file="$(find realsense2_camera)/launch/rs_camera.launch">
+    <arg name="serial_no" value="$(arg serial_no)" />
+    <arg name="camera" value="$(arg camera)" />
+    <arg name="enable_color" value="true" />
+    <arg name="color_width" value="1280" />
+    <arg name="color_height" value="720" />
+    <arg name="color_fps" value="30" />
+    <arg name="enable_depth" value="true" />
+    <arg name="depth_width" value="848" />
+    <arg name="depth_height" value="480" />
+    <arg name="depth_fps" value="30" />
+    <arg name="enable_pointcloud" value="$(arg enable_pointcloud)" />
+    <arg name="align_depth" value="false" />
+    <arg name="publish_tf" value="true" />
+    <arg name="enable_gyro" value="false" />
+    <arg name="enable_accel" value="false" />
+  </include>
+</launch>
