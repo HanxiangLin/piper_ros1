@@ -84,7 +84,7 @@ class SnapshotTests(unittest.TestCase):
     def fake_scene(outer="base_link", inner="base_link", data=None):
         octomap = SimpleNamespace(id="OcTree", resolution=.02,
                                   data=[1, 2] if data is None else data,
-                                  header=SimpleNamespace(frame_id=inner))
+                                  binary=True, header=SimpleNamespace(frame_id=inner))
         wrapped = SimpleNamespace(header=SimpleNamespace(frame_id=outer), octomap=octomap)
         return SimpleNamespace(world=SimpleNamespace(octomap=wrapped))
 
@@ -92,7 +92,12 @@ class SnapshotTests(unittest.TestCase):
         scene = self.fake_scene()
         self.assertTrue(self.module.has_octomap(scene))
         self.assertEqual(self.module.octomap_frame(scene), "base_link")
+        report = self.module.describe_octomap(scene)
+        self.assertTrue(report["present"])
+        self.assertEqual(report["frame"], "base_link")
+        self.assertEqual(report["serialized_bytes"], 2)
         self.assertFalse(self.module.has_octomap(self.fake_scene(data=[])))
+        self.assertEqual(self.module.describe_octomap(self.fake_scene(data=[])), {"present": False})
         with self.assertRaisesRegex(ValueError, "不一致"):
             self.module.octomap_frame(self.fake_scene(inner="world"))
 
@@ -101,6 +106,11 @@ class SnapshotTests(unittest.TestCase):
             self.module.parse_args(["load", "--input", "map.bag"])
         args = self.module.parse_args(["load", "--input", "map.bag", "--replace"])
         self.assertTrue(args.replace)
+
+    def test_inspect_is_read_only_subcommand(self):
+        args = self.module.parse_args(["inspect"])
+        self.assertEqual(args.command, "inspect")
+        self.assertEqual(args.get_service, "/get_planning_scene")
 
     def test_world_diff_contains_no_robot_snapshot(self):
         from moveit_msgs.msg import PlanningScene

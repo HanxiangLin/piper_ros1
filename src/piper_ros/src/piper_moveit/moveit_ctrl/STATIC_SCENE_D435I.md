@@ -4,6 +4,32 @@
 不会持续实时避障。操作者明确开启扫描时，RealSense 点云才进入 MoveIt；明确停止后，
 MoveIt 内部 OctoMap 保持冻结，供后续 OMPL 规划做碰撞检查。
 
+## 0. 操作路线图
+
+只按当前所处状态选择一条路线：
+
+```text
+还没有地图
+  → 第2节启动四组节点
+  → 第3节 clear / start / 多视角扫描 / stop
+  → 第4节检查地图
+  → 第5节保存
+
+刚刚保存成功，move_group 没有重启
+  → 不要 load
+  → 第5.1节检查当前内存地图
+  → 第6节只做规划验证
+
+以后重启了 move_group
+  → 不必重新扫描（环境和安装完全没变时）
+  → 第5.2节从 static_scene.bag 恢复
+  → 第5.1节再次检查
+  → 第6节只做规划验证
+```
+
+`save`只是复制当前地图到磁盘，不会从MoveIt删除地图。因此刚刚保存后直接继续检查和规划，
+不能马上执行`load`；`load --replace`用于未来重启后恢复，会先清空当时的内存地图。
+
 ## 1. 已实现的链路
 
 ```text
@@ -143,7 +169,7 @@ MotionPlanning → Scene Geometry → Show Scene Geometry = true
 
 如果地图错误，执行 `stop`、`clear`，修正问题后重新扫描。不要在错误地图上规划实机运动。
 
-## 5. 保存和恢复静态 OctoMap
+## 5. 保存、检查和恢复静态 OctoMap
 
 停止扫描后保存。工具拒绝覆盖已有快照：
 
@@ -156,6 +182,42 @@ export PIPER_SCENE_PKG="$(rospack find moveit_ctrl)"
 ```
 
 快照只保存 `base_link` 中的 OctoMap，不保存机器人关节状态，也不替代普通 CollisionObject。
+
+### 5.1 刚刚保存成功：检查当前内存地图
+
+保持原来的 `move_group` 运行，扫描门保持关闭。此时不运行 `load`，只读检查：
+
+```bash
+export PIPER_SCENE_PKG="$(rospack find moveit_ctrl)"
+
+rosrun moveit_ctrl static_scan_control.py status
+
+/usr/bin/python3 "$PIPER_SCENE_PKG/scripts/static_scene_snapshot.py" inspect
+```
+
+第一条应显示 `enabled=false`。第二条应明确显示：
+
+```text
+MoveIt OctoMap：非空
+frame: base_link
+resolution: 0.020 m
+```
+
+`serialized bytes`只说明快照数据非空，不是障碍体素数量。若显示空地图，不进入第6节；重新检查
+`session_forwarded`、点云话题、MoveIt启动日志和RViz Scene Geometry。
+
+然后在RViz设置：
+
+```text
+Global Options → Fixed Frame = base_link
+MotionPlanning → Scene Geometry → Show Scene Geometry = true
+MotionPlanning → Planning Request → Planning Group = arm
+MotionPlanning → Planning Request → Start State = Current
+```
+
+地图应与刚才扫描时相同。这里看到的是MoveIt内部Planning Scene，不是单独添加的实时PointCloud2。
+
+### 5.2 仅在以后重启 MoveIt 后恢复
 
 重启 MoveIt 后，先保证扫描门处于关闭状态，再恢复。`--replace` 是必须的显式确认，
 它表示先清空当前 MoveIt OctoMap，再加载快照：
@@ -174,7 +236,26 @@ rosrun moveit_ctrl static_scan_control.py stop
 
 ## 6. 规划与执行边界
 
-先只点击 RViz 的 `Plan`，检查完整轨迹和 Planning Scene，确认后才允许低速执行。
+### 6.1 当前只做规划，不执行
+
+保持扫描门 `enabled=false`，不要关闭当前 `move_group`。在RViz的MotionPlanning面板中：
+
+1. `Planning Group`选择`arm`，`Start State`选择`Current`。
+2. 用末端交互标记选择一个明确位于空闲区、机械臂可达的目标。
+3. 点击`Plan`，不要点击`Plan & Execute`，也不要点击`Execute`。
+4. 展开显示轨迹，逐段观察机器人模型、末端和各连杆是否穿过OctoMap体素。
+5. 再选择一个位于已扫描障碍物内部的目标，只点击`Plan`；它应规划失败。
+6. 选择障碍物另一侧的可达自由目标；如果存在足够间隙，OMPL应产生绕行轨迹，否则应失败。
+
+目标在自由区仍失败不一定是地图故障，也可能是IK不可达、关节限位或没有足够绕行空间。
+目标在障碍物内部却成功，或显示轨迹穿过体素，禁止实机执行并检查Planning Scene。
+
+### 6.2 实机执行前仍缺少一项
+
+当前D435i和实际安装支架还没有加入机器人碰撞模型。在提供并配置相机/支架相对`link6`的
+实际包络尺寸和位置之前，只做上述`Plan`检查，不进入实机自动执行。否则MoveIt可能成功避开裸机械臂，
+但相机或支架撞上障碍物。
+
 OMPL的普通关节/位姿目标规划会针对当前OctoMap寻找无碰撞路径；
 `compute_cartesian_path(..., avoid_collisions=True)`只检查笛卡尔插值路径，遇到障碍通常截短或失败，
 不会主动绕弯。

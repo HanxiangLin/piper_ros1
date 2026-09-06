@@ -20,6 +20,8 @@ def parse_args(argv=None):
     save = subparsers.add_parser("save", help="保存当前非空 MoveIt OctoMap，不覆盖旧文件")
     save.add_argument("--output", required=True)
     save.add_argument("--get-service", default="/get_planning_scene")
+    inspect = subparsers.add_parser("inspect", help="只读检查当前 MoveIt OctoMap 是否非空")
+    inspect.add_argument("--get-service", default="/get_planning_scene")
     load = subparsers.add_parser("load", help="清空当前 OctoMap 后恢复一个快照")
     load.add_argument("--input", required=True)
     load.add_argument("--apply-service", default="/apply_planning_scene")
@@ -67,6 +69,31 @@ def world_only_diff(scene):
     return result
 
 
+def describe_octomap(scene):
+    if not has_octomap(scene):
+        return {"present": False}
+    octomap = scene.world.octomap.octomap
+    return {
+        "present": True,
+        "frame": octomap_frame(scene),
+        "id": octomap.id,
+        "binary": bool(octomap.binary),
+        "resolution_m": float(octomap.resolution),
+        "serialized_bytes": len(octomap.data),
+    }
+
+
+def query_octomap(service_name, timeout):
+    import rospy
+    from moveit_msgs.msg import PlanningSceneComponents
+    from moveit_msgs.srv import GetPlanningScene, GetPlanningSceneRequest
+
+    rospy.wait_for_service(service_name, timeout=timeout)
+    request = GetPlanningSceneRequest()
+    request.components.components = PlanningSceneComponents.OCTOMAP
+    return rospy.ServiceProxy(service_name, GetPlanningScene)(request).scene
+
+
 def output_path(value):
     path = Path(value).expanduser().absolute()
     if path.exists() or path.is_symlink():
@@ -94,14 +121,9 @@ def read_snapshot(path):
 def save_command(args):
     import rosbag
     import rospy
-    from moveit_msgs.msg import PlanningSceneComponents
-    from moveit_msgs.srv import GetPlanningScene, GetPlanningSceneRequest
 
     destination = output_path(args.output)
-    rospy.wait_for_service(args.get_service, timeout=args.timeout)
-    request = GetPlanningSceneRequest()
-    request.components.components = PlanningSceneComponents.OCTOMAP
-    scene = rospy.ServiceProxy(args.get_service, GetPlanningScene)(request).scene
+    scene = query_octomap(args.get_service, args.timeout)
     if not has_octomap(scene):
         raise ValueError("MoveIt 当前 OctoMap 为空；先完成扫描并停止扫描门")
     frame = octomap_frame(scene)
@@ -116,6 +138,19 @@ def save_command(args):
     print("已保存静态 OctoMap：{}；frame={}，resolution={:.3f} m，序列化字节={}".format(
         destination, frame, scene.world.octomap.octomap.resolution,
         len(scene.world.octomap.octomap.data)))
+    return 0
+
+
+def inspect_command(args):
+    report = describe_octomap(query_octomap(args.get_service, args.timeout))
+    if not report["present"]:
+        print("MoveIt OctoMap：空。不要开始避障规划；检查扫描门和点云更新器。")
+        return 2
+    print("MoveIt OctoMap：非空")
+    print("  frame: {}".format(report["frame"]))
+    print("  tree: {} ({})".format(report["id"], "binary" if report["binary"] else "full"))
+    print("  resolution: {:.3f} m".format(report["resolution_m"]))
+    print("  serialized bytes: {}（不是体素数量）".format(report["serialized_bytes"]))
     return 0
 
 
@@ -145,10 +180,15 @@ def main(argv=None):
         # rosbag imports Cryptodome on Noetic. The workspace's Piper Conda
         # interpreter lacks it, while ROS Noetic's system Python provides it.
         # Fail with an actionable message before initializing a ROS node.
-        import rosbag  # noqa: F401
+        if args.command in ("save", "load"):
+            import rosbag  # noqa: F401
         import rospy
         rospy.init_node("piper_static_scene_snapshot", anonymous=True)
-        return save_command(args) if args.command == "save" else load_command(args)
+        if args.command == "save":
+            return save_command(args)
+        if args.command == "inspect":
+            return inspect_command(args)
+        return load_command(args)
     except ModuleNotFoundError as error:
         if error.name == "Cryptodome":
             print("静态地图快照操作失败：当前 Python 缺少 Cryptodome。请用 /usr/bin/python3 "
