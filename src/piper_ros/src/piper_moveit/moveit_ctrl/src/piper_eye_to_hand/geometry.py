@@ -1,9 +1,13 @@
-"""ROS-independent eye-to-hand calibration geometry (metres and radians).
+"""ROS-independent eye-to-hand / eye-in-hand geometry (metres and radians).
 
 Transform notation ``a_T_b`` maps coordinates from frame b into frame a.
 For a fixed external camera and a target rigidly fixed to the end effector::
 
     base_T_ee[i] @ ee_T_target = base_T_camera @ camera_T_target[i]
+
+For a camera rigidly mounted on the end effector and a stationary target::
+
+    base_T_ee[i] @ ee_T_camera @ camera_T_target[i] = base_T_target
 
 The camera frame must be the optical frame used by the target pose estimator.
 No sample is silently removed. Excitation thresholds are numerical safeguards,
@@ -165,7 +169,8 @@ def _check_excitation(pairs):
     translation_spans = []
     for i, (base_i, _) in enumerate(pairs):
         for base_j, _ in pairs[i + 1:]:
-            # OpenCV input A_i = inv(B_i); relative A_j^-1 A_i = B_j B_i^-1.
+            # Common-base relative rotations test physical motion diversity,
+            # independently of which hand-eye mode feeds OpenCV.
             relative_rotation = base_j[:3, :3] @ base_i[:3, :3].T
             rotation_vectors.append(cv2.Rodrigues(relative_rotation)[0].reshape(3))
             translation_spans.append(float(np.linalg.norm(
@@ -257,5 +262,70 @@ def solve_eye_to_hand(samples, min_samples=12):
         "method": "PARK",
         "sample_count": len(pairs),
         "training_residuals": evaluate_samples(samples, base_T_camera, ee_T_target),
+        "excitation": excitation,
+    }
+
+
+def evaluate_eye_in_hand_samples(samples, ee_T_camera, base_T_target):
+    """Evaluate B_i X C_i = Y against the FIXED training target pose Y.
+
+    X maps optical-camera coordinates into the camera's mounting link. Neither
+    X nor Y is refitted on validation data: a moved table target must be visible
+    in the residuals, rather than disappearing when its mean is recomputed.
+    """
+    pairs = _samples(samples, minimum=1)
+    camera_mount = _transform(ee_T_camera, "ee_T_camera")
+    target = _transform(base_T_target, "base_T_target")
+    per_sample = []
+    for index, (base_T_ee, camera_T_target) in enumerate(pairs):
+        observed = base_T_ee @ camera_mount @ camera_T_target
+        per_sample.append({
+            "index": index,
+            "translation_error_m": float(np.linalg.norm(observed[:3, 3] - target[:3, 3])),
+            "rotation_error_deg": _rotation_error_deg(target[:3, :3].T @ observed[:3, :3]),
+        })
+    return {
+        "sample_count": len(pairs),
+        "translation": _statistics([row["translation_error_m"] for row in per_sample], "m"),
+        "rotation": _statistics([row["rotation_error_deg"] for row in per_sample], "deg"),
+        "per_sample": per_sample,
+    }
+
+
+def solve_eye_in_hand(samples, min_samples=12):
+    """Solve B_i X C_i = Y with OpenCV PARK, returning X=ee_T_camera.
+
+    Unlike eye-to-hand, feed base_T_ee DIRECTLY to calibrateHandEye. The return
+    value is camera-to-gripper (ee_T_camera), not base_T_camera and not its
+    inverse. C_i comes from the camera's optical frame. Target Y is stationary
+    in the base frame; its mounting position need not be known in advance.
+    """
+    if (isinstance(min_samples, bool) or not isinstance(min_samples, (int, np.integer))
+            or min_samples < 3):
+        raise ValueError("min_samples must be an integer >= 3")
+    pairs = _samples(samples, minimum=int(min_samples))
+    excitation = _check_excitation(pairs)
+    try:
+        rotation, translation = cv2.calibrateHandEye(
+            [base[:3, :3].copy() for base, _ in pairs],
+            [base[:3, 3].reshape(3, 1).copy() for base, _ in pairs],
+            [camera[:3, :3].copy() for _, camera in pairs],
+            [camera[:3, 3].reshape(3, 1).copy() for _, camera in pairs],
+            method=cv2.CALIB_HAND_EYE_PARK,
+        )
+    except cv2.error as exc:
+        raise ValueError("OpenCV PARK eye-in-hand solve failed: {}".format(exc)) from exc
+    ee_T_camera = np.eye(4, dtype=float)
+    ee_T_camera[:3, :3] = rotation
+    ee_T_camera[:3, 3] = np.asarray(translation).reshape(3)
+    _transform(ee_T_camera, "OpenCV PARK ee_T_camera result")
+    base_T_target = _mean_transform([base @ ee_T_camera @ camera for base, camera in pairs])
+    _transform(base_T_target, "base_T_target result")
+    return {
+        "ee_T_camera": ee_T_camera.tolist(),
+        "base_T_target": base_T_target.tolist(),
+        "method": "PARK",
+        "sample_count": len(pairs),
+        "training_residuals": evaluate_eye_in_hand_samples(samples, ee_T_camera, base_T_target),
         "excitation": excitation,
     }

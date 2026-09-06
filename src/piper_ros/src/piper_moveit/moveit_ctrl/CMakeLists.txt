@@ -45,12 +45,14 @@ catkin_install_python(PROGRAMS
   scripts/eye_to_hand_make_board.py
   scripts/eye_to_hand_collect.py
   scripts/eye_to_hand_solve.py
+  scripts/eye_in_hand_collect.py
+  scripts/eye_in_hand_solve.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
 install(DIRECTORY launch calibration
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )
-install(FILES EYE_TO_HAND_D435I.md
+install(FILES EYE_TO_HAND_D435I.md EYE_IN_HAND_D435I.md
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )

@@ -11,6 +11,22 @@ import cv2
 import numpy as np
 
 FORMAT = "piper_eye_to_hand.samples.v1"
+MODES = ("eye_to_hand", "eye_in_hand")
+
+
+def mode_format(mode, kind="samples"):
+    if mode not in MODES:
+        raise ValueError("未知标定模式：{}".format(mode))
+    if kind not in ("samples", "calibration", "validation"):
+        raise ValueError("未知标定数据类型")
+    return "piper_{}.{}.v1".format(mode, kind)
+
+
+def check_mode(data, expected_mode, kind="samples"):
+    if (not isinstance(data, dict) or data.get("format") != mode_format(expected_mode, kind)
+            or data.get("mode", expected_mode) != expected_mode):
+        raise ValueError("需要 {} 的 {} 数据，禁止混用两种标定模式或仅改文件名".format(
+            expected_mode, kind))
 
 
 def utc_now():
@@ -115,11 +131,12 @@ def atomic_write_json(path, data):
             os.unlink(temporary)
 
 
-def load_dataset(path):
+def load_dataset(path, expected_mode="eye_to_hand"):
     with open(path, encoding="utf-8") as handle:
         data = json.load(handle)
-    if not isinstance(data, dict) or data.get("format") != FORMAT or not isinstance(data.get("samples"), list):
-        raise ValueError("不是 eye-to-hand 采样文件")
+    check_mode(data, expected_mode)
+    if not isinstance(data.get("samples"), list):
+        raise ValueError("采样文件缺少 samples 列表")
     for field in ("board", "frames", "camera_info", "camera_link_T_optical"):
         if field not in data:
             raise ValueError("采样文件缺少必要字段：{}".format(field))

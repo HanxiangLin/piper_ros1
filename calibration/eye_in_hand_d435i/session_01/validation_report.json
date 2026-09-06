@@ -1,0 +1,54 @@
+{
+  "sample_count": 5,
+  "translation": {
+    "unit": "m",
+    "rms": 0.014325553665395157,
+    "mean": 0.013100165008991329,
+    "max": 0.020654874044788874
+  },
+  "rotation": {
+    "unit": "deg",
+    "rms": 1.2536104961565797,
+    "mean": 1.1059494333412843,
+    "max": 2.080133009100611
+  },
+  "per_sample": [
+    {
+      "index": 0,
+      "translation_error_m": 0.007557531920712015,
+      "rotation_error_deg": 0.2779183462882758
+    },
+    {
+      "index": 1,
+      "translation_error_m": 0.015846177989031433,
+      "rotation_error_deg": 1.2962730577173742
+    },
+    {
+      "index": 2,
+      "translation_error_m": 0.005181214399260595,
+      "rotation_error_deg": 1.0230792428024675
+    },
+    {
+      "index": 3,
+      "translation_error_m": 0.020654874044788874,
+      "rotation_error_deg": 0.8523435107976928
+    },
+    {
+      "index": 4,
+      "translation_error_m": 0.016261026691163732,
+      "rotation_error_deg": 2.080133009100611
+    }
+  ],
+  "format": "piper_eye_in_hand.validation.v1",
+  "mode": "eye_in_hand",
+  "created_at": "2026-09-06T06:26:58.018740+00:00",
+  "thresholds": {
+    "max_translation_m": 0.01,
+    "max_rotation_deg": 2.0
+  },
+  "passed": false,
+  "note": "独立位姿一致性验证；不检测共模系统误差，不等于避障安全间隙或绝对精度保证。",
+  "calibration_file": "/home/hank/piper_ws/calibration/eye_in_hand_d435i/session_01/result.json",
+  "calibration_sha256": "853bc7872472e2e6e869aa6dcbb9bc0d6f5640ac72bd8dfd04c27cdb1b329d15",
+  "validation_dataset": "/home/hank/piper_ws/calibration/eye_in_hand_d435i/session_01/validation.json"
+}

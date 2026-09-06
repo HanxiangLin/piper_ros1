@@ -1,0 +1,12 @@
+<launch>
+  <!-- Camera streams are identical in both mounting modes. No arm motion or
+       external TF is started here; calibrated parent must be the mounting link. -->
+  <arg name="serial_no" default="" />
+  <arg name="camera" default="camera" />
+  <arg name="enable_pointcloud" default="false" />
+  <include file="$(find moveit_ctrl)/launch/eye_to_hand_camera.launch">
+    <arg name="serial_no" value="$(arg serial_no)" />
+    <arg name="camera" value="$(arg camera)" />
+    <arg name="enable_pointcloud" value="$(arg enable_pointcloud)" />
+  </include>
+</launch>
