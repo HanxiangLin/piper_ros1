@@ -1,0 +1,14 @@
+<launch>
+  <!-- This launch does not start a camera, MoveIt, or robot driver. It only
+       gates an existing PointCloud2 stream. Scan starts disabled. -->
+  <arg name="input_cloud" default="/camera/depth/color/points" />
+  <arg name="output_cloud" default="/piper/static_scan/points" />
+  <arg name="max_age" default="0.75" />
+
+  <node name="piper_static_scan_gate"
+        pkg="moveit_ctrl"
+        type="static_scan_gate.py"
+        output="screen"
+        required="true"
+        args="--input-cloud $(arg input_cloud) --output-cloud $(arg output_cloud) --max-age $(arg max_age)" />
+</launch>

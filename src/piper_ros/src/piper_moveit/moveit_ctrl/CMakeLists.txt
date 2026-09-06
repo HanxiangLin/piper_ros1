@@ -47,12 +47,15 @@ catkin_install_python(PROGRAMS
   scripts/eye_to_hand_solve.py
   scripts/eye_in_hand_collect.py
   scripts/eye_in_hand_solve.py
+  scripts/static_scan_gate.py
+  scripts/static_scan_control.py
+  scripts/static_scene_snapshot.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
 install(DIRECTORY launch calibration
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )
-install(FILES EYE_TO_HAND_D435I.md EYE_IN_HAND_D435I.md
+install(FILES EYE_TO_HAND_D435I.md EYE_IN_HAND_D435I.md STATIC_SCENE_D435I.md
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )

@@ -233,6 +233,9 @@ rosrun tf tf_echo base_link camera_color_optical_frame
 
 ## 7. 与后续静态环境扫描的衔接
 
+手眼外参和点云稳定性检查通过后，按照
+[静态预扫描与 MoveIt OctoMap 指南](STATIC_SCENE_D435I.md) 启动受控扫描门、建立并冻结地图。
+
 标定成功后，相机点云可沿下面的时间相关变换转换到基座：
 
 ```text
