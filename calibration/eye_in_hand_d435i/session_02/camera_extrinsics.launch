@@ -1,0 +1,2 @@
+<?xml version='1.0' encoding='utf-8'?>
+<launch><!--Generated after independent validation. Run only one parent transform for camera_link.--><node pkg="tf2_ros" type="static_transform_publisher" name="piper_eye_in_hand_camera_tf" args="-0.080160828114 0.0137396459811 0.0364937449311 0.0119607068533 -0.686925832257 0.0110662999515 0.726544822757 link6 camera_link" /></launch>
