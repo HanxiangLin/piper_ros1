@@ -10,6 +10,8 @@ import re
 import sys
 import uuid
 
+from piper_static_scene.octomap import describe_octomap, has_octomap, octomap_frame
+
 SNAPSHOT_TOPIC = "/piper_static_scan/octomap_snapshot"
 
 
@@ -26,7 +28,7 @@ def parse_args(argv=None):
     load.add_argument("--input", required=True)
     load.add_argument("--apply-service", default="/apply_planning_scene")
     load.add_argument("--clear-service", default="/clear_octomap")
-    load.add_argument("--expected-frame", default="base_link")
+    load.add_argument("--expected-frame", default="dummy_link")
     load.add_argument("--replace", action="store_true",
                       help="确认先清空 MoveIt 当前 OctoMap；恢复时必须显式提供")
     raw = sys.argv[1:] if argv is None else argv
@@ -42,22 +44,6 @@ def parse_args(argv=None):
     return args
 
 
-def has_octomap(scene):
-    octomap = scene.world.octomap.octomap
-    return bool(octomap.id and octomap.resolution > 0 and octomap.data)
-
-
-def octomap_frame(scene):
-    outer = scene.world.octomap.header.frame_id
-    inner = scene.world.octomap.octomap.header.frame_id
-    if outer and inner and outer != inner:
-        raise ValueError("OctoMap 内外 header frame 不一致")
-    frame = outer or inner
-    if not frame:
-        raise ValueError("OctoMap 缺少 frame_id")
-    return frame.lstrip("/")
-
-
 def world_only_diff(scene):
     """Return an apply-planning-scene diff containing only the saved OctoMap."""
     from moveit_msgs.msg import PlanningScene
@@ -67,20 +53,6 @@ def world_only_diff(scene):
     result.robot_state.is_diff = True
     result.world.octomap = copy.deepcopy(scene.world.octomap)
     return result
-
-
-def describe_octomap(scene):
-    if not has_octomap(scene):
-        return {"present": False}
-    octomap = scene.world.octomap.octomap
-    return {
-        "present": True,
-        "frame": octomap_frame(scene),
-        "id": octomap.id,
-        "binary": bool(octomap.binary),
-        "resolution_m": float(octomap.resolution),
-        "serialized_bytes": len(octomap.data),
-    }
 
 
 def query_octomap(service_name, timeout):

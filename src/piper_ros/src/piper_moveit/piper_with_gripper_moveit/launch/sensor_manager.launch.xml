@@ -6,7 +6,9 @@
   <rosparam command="load" file="$(find piper_with_gripper_moveit)/config/sensors_3d.yaml" />
 
   <!-- Params for the octomap monitor -->
-  <param name="octomap_frame" type="string" value="base_link" />
+  <!-- MoveIt's robot model root/planning frame. It is connected to base_link
+       by the identity fixed joint base_to_dummy. -->
+  <param name="octomap_frame" type="string" value="dummy_link" />
   <param name="octomap_resolution" type="double" value="0.02" />
   <param name="max_range" type="double" value="2.0" />
 

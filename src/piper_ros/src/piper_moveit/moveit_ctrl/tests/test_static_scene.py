@@ -15,6 +15,7 @@ PACKAGE = Path(__file__).resolve().parents[1]
 WORKSPACE_SRC = PACKAGE.parents[2]
 sys.path.insert(0, str(PACKAGE / "src"))
 from piper_static_scene.gate import GateState
+from piper_static_scene.octomap import octomap_signature
 
 
 def load_script(name):
@@ -61,6 +62,12 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(sensor["point_cloud_topic"], "/piper/static_scan/points")
         self.assertGreaterEqual(sensor["padding_offset"], .02)
 
+        launch = PACKAGE.parent / "piper_with_gripper_moveit" / "launch" / "sensor_manager.launch.xml"
+        root = ET.parse(launch).getroot()
+        params = {item.attrib["name"]: item.attrib.get("value")
+                  for item in root.findall("param")}
+        self.assertEqual(params["octomap_frame"], "dummy_link")
+
     def test_mapping_launch_starts_only_disabled_gate(self):
         root = ET.parse(PACKAGE / "launch" / "static_scene_mapping.launch").getroot()
         nodes = root.findall("node")
@@ -74,6 +81,39 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(args.input_cloud, "/points")
         control = load_script("static_scan_control")
         self.assertEqual(control.parse_args(["status", "__log:=/tmp/log"]).command, "status")
+
+    def test_static_goal_helpers_and_safety_parameters(self):
+        module = load_script("moveit_static_scene_goal")
+        pose = SimpleNamespace(pose=SimpleNamespace(position=SimpleNamespace(x=1., y=2., z=3.)))
+        moved = module.apply_translation_delta(pose, .1, -.2, .05)
+        self.assertEqual((moved.pose.position.x, moved.pose.position.y, moved.pose.position.z),
+                         (1.1, 1.8, 3.05))
+        self.assertEqual((pose.pose.position.x, pose.pose.position.y, pose.pose.position.z),
+                         (1., 2., 3.))
+
+        trajectory = SimpleNamespace(joint_trajectory=SimpleNamespace(points=[object()]))
+        self.assertIs(module.unpack_plan((True, trajectory, 0.1, None)), trajectory)
+        self.assertIsNone(module.unpack_plan((False, trajectory, 0.1, None)))
+
+        class FakeRospy:
+            params = {"~dx": .03, "~execute": True}
+
+            @classmethod
+            def get_param(cls, name, default=None):
+                return cls.params.get(name, default)
+
+        with self.assertRaisesRegex(ValueError, "碰撞模型"):
+            module.read_parameters(FakeRospy)
+        FakeRospy.params["~acknowledge_missing_camera_collision"] = True
+        values = module.read_parameters(FakeRospy)
+        self.assertTrue(values["execute"])
+        self.assertEqual(values["expected_map_frame"], "dummy_link")
+
+        FakeRospy.params.update({"~dx": .30, "~execute": False})
+        self.assertEqual(module.read_parameters(FakeRospy)["dx"], .30)
+        FakeRospy.params["~dx"] = .501
+        with self.assertRaisesRegex(ValueError, "0.005～0.50"):
+            module.read_parameters(FakeRospy)
 
 
 class SnapshotTests(unittest.TestCase):
@@ -96,6 +136,9 @@ class SnapshotTests(unittest.TestCase):
         self.assertTrue(report["present"])
         self.assertEqual(report["frame"], "base_link")
         self.assertEqual(report["serialized_bytes"], 2)
+        first_signature = octomap_signature(scene)
+        scene.world.octomap.octomap.data.append(3)
+        self.assertNotEqual(first_signature, octomap_signature(scene))
         self.assertFalse(self.module.has_octomap(self.fake_scene(data=[])))
         self.assertEqual(self.module.describe_octomap(self.fake_scene(data=[])), {"present": False})
         with self.assertRaisesRegex(ValueError, "不一致"):
@@ -106,6 +149,7 @@ class SnapshotTests(unittest.TestCase):
             self.module.parse_args(["load", "--input", "map.bag"])
         args = self.module.parse_args(["load", "--input", "map.bag", "--replace"])
         self.assertTrue(args.replace)
+        self.assertEqual(args.expected_frame, "dummy_link")
 
     def test_inspect_is_read_only_subcommand(self):
         args = self.module.parse_args(["inspect"])

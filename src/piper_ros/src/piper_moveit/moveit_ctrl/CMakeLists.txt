@@ -50,6 +50,7 @@ catkin_install_python(PROGRAMS
   scripts/static_scan_gate.py
   scripts/static_scan_control.py
   scripts/static_scene_snapshot.py
+  scripts/moveit_static_scene_goal.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

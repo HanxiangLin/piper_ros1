@@ -37,14 +37,14 @@ RealSense PointCloud2（带原始时间戳和 optical frame）
   → static_scan_gate.py（默认关闭，不改变点云 header）
   → /piper/static_scan/points
   → occupancy_map_monitor/PointCloudOctomapUpdater
-  → base_link 中 0.02 m 分辨率的 MoveIt OctoMap
+  → MoveIt规划根 dummy_link 中 0.02 m 分辨率的OctoMap
   → Planning Scene 碰撞检查
 ```
 
 配置位置：
 
 - `piper_with_gripper_moveit/config/sensors_3d.yaml`：点云更新器、2 m最大量程、3 cm自体过滤膨胀。
-- `piper_with_gripper_moveit/launch/sensor_manager.launch.xml`：`base_link`地图坐标、2 cm体素。
+- `piper_with_gripper_moveit/launch/sensor_manager.launch.xml`：`dummy_link`地图坐标、2 cm体素。
 - `moveit_ctrl/launch/static_scene_mapping.launch`：只启动扫描门；不启动相机、MoveIt或机械臂。
 - `static_scan_control.py`：`clear/start/stop/status`。
 - `static_scene_snapshot.py`：保存、恢复 MoveIt 内部 OctoMap。
@@ -131,7 +131,7 @@ rosrun moveit_ctrl static_scan_control.py start
 `FollowJointTrajectory` 成功反馈并停稳，再保持观察数秒。尽量覆盖工作区的前后、左右、上下表面，
 但不进入未确认安全的区域。不要移动桌面和障碍物。
 
-点云的原始时间戳和 frame 会被保留，MoveIt 使用对应时刻的 TF 转到 `base_link`。
+点云的原始时间戳和 frame 会被保留，MoveIt 使用对应时刻的 TF 转到规划根 `dummy_link`。
 扫描门拒绝零时间戳、过旧、超前或无 frame 的点云，不使用“最新 TF”冒充采集时刻。
 
 扫描过程中可检查：
@@ -181,7 +181,9 @@ export PIPER_SCENE_PKG="$(rospack find moveit_ctrl)"
   --output "$PIPER_STATIC_MAP"
 ```
 
-快照只保存 `base_link` 中的 OctoMap，不保存机器人关节状态，也不替代普通 CollisionObject。
+快照只保存MoveIt规划根`dummy_link`中的OctoMap，不保存机器人关节状态，也不替代普通CollisionObject。
+Piper URDF通过零平移、零旋转的固定关节连接`dummy_link → base_link`，两者坐标值完全重合；
+RViz继续使用`base_link`作为Fixed Frame即可。
 
 ### 5.1 刚刚保存成功：检查当前内存地图
 
@@ -199,7 +201,7 @@ rosrun moveit_ctrl static_scan_control.py status
 
 ```text
 MoveIt OctoMap：非空
-frame: base_link
+frame: dummy_link
 resolution: 0.020 m
 ```
 
@@ -227,7 +229,7 @@ rosrun moveit_ctrl static_scan_control.py stop
 
 /usr/bin/python3 "$PIPER_SCENE_PKG/scripts/static_scene_snapshot.py" load \
   --input "$PIPER_STATIC_MAP" \
-  --expected-frame base_link \
+  --expected-frame dummy_link \
   --replace
 ```
 
@@ -263,3 +265,48 @@ OMPL的普通关节/位姿目标规划会针对当前OctoMap寻找无碰撞路�
 冻结地图不是实时避障：扫描后移动、新增的物体、人员和漏测区域不会自动更新。
 OctoMap的2 cm体素与3 cm过滤膨胀只是起始配置，不是安全认证。实际安全余量还要结合标定误差、
 深度噪声、机械臂跟踪误差、负载变形和任务风险设置。
+
+## 7. RViz规划验证通过后：用脚本提交目标
+
+`moveit_static_scene_goal.py`使用OMPL针对当前冻结OctoMap规划一个末端平移目标，保持末端姿态不变。
+它先检查地图非空、frame为MoveIt规划根`dummy_link`、扫描门已经关闭，并在规划前后比较地图哈希。
+默认只规划并把同一条轨迹发布到RViz，不向机械臂发送命令。
+
+先选择一个已经在RViz验证过的相对位移。例如沿MoveIt规划坐标系X方向移动3 cm：
+
+```bash
+rosrun moveit_ctrl moveit_static_scene_goal.py \
+  _dx:=0.03 _dy:=0.0 _dz:=0.0 \
+  _execute:=false
+```
+
+终端会打印实际规划坐标系、当前末端位置、目标位置、规划器、轨迹点和预计时长。
+在RViz观察`Display Planned Path`。如果障碍物阻断直线路径但存在绕行空间，RRTConnect可以给出绕行；
+目标不可达、位于障碍物中或不存在无碰撞通道时，脚本应失败且不会运动。
+
+相对位移长度限制为5 mm～50 cm，因此可以使用`_dx:=0.30`进行30 cm的只规划避障测试。
+`dx/dy/dz`使用终端打印的MoveIt规划坐标系轴，不能把相机光学轴当作它们。较大的位移并不保证
+目标可达；仍须确保目标和完整轨迹都位于已经扫描、现实中确认安全的区域。
+
+你已经明确暂时不加入相机/支架碰撞模型。如果仍要执行同一轮新规划，必须同时打开两项显式开关：
+
+```bash
+rosrun moveit_ctrl moveit_static_scene_goal.py \
+  _dx:=0.03 _dy:=0.0 _dz:=0.0 \
+  _velocity_scale:=0.03 _acceleration_scale:=0.03 \
+  _execute:=true \
+  _acknowledge_missing_camera_collision:=true
+```
+
+脚本规划并在RViz显示后会停在终端等待。检查现场、OctoMap和这一次显示的轨迹；只有输入完全一致的：
+
+```text
+EXECUTE
+```
+
+才会调用`arm.execute(trajectory, wait=True)`。它等待MoveIt ExecuteTrajectory Action，进而等待
+Piper `FollowJointTrajectory`服务端的完成结果；没有用延时冒充完成反馈。确认等待期间如果扫描门开启
+或OctoMap内容改变，执行会被拒绝。
+
+即使提供确认参数，缺少相机/支架碰撞模型的风险仍然存在：MoveIt只保证当前机器人模型和OctoMap
+之间的碰撞检查，不会凭确认参数获得相机外形。第一次只用低速、小位移、急停可用并由人员全程观察。
