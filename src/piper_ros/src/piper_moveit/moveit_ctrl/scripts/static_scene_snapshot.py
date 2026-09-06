@@ -141,13 +141,30 @@ def load_command(args):
 
 def main(argv=None):
     args = parse_args(argv)
-    import rospy
-    rospy.init_node("piper_static_scene_snapshot", anonymous=True)
     try:
+        # rosbag imports Cryptodome on Noetic. The workspace's Piper Conda
+        # interpreter lacks it, while ROS Noetic's system Python provides it.
+        # Fail with an actionable message before initializing a ROS node.
+        import rosbag  # noqa: F401
+        import rospy
+        rospy.init_node("piper_static_scene_snapshot", anonymous=True)
         return save_command(args) if args.command == "save" else load_command(args)
-    except (ValueError, RuntimeError, OSError, rospy.ROSException, rospy.ServiceException) as error:
+    except ModuleNotFoundError as error:
+        if error.name == "Cryptodome":
+            print("静态地图快照操作失败：当前 Python 缺少 Cryptodome。请用 /usr/bin/python3 "
+                  "直接运行 moveit_ctrl/scripts/static_scene_snapshot.py。", file=sys.stderr)
+            return 1
+        raise
+    except (ValueError, RuntimeError, OSError) as error:
         print("静态地图快照操作失败：{}".format(error), file=sys.stderr)
         return 1
+    except Exception as error:
+        # Keep ROS transport failures concise without importing rospy in an
+        # interpreter where its dependency import already failed.
+        if error.__class__.__module__.startswith("rospy"):
+            print("静态地图快照操作失败：{}".format(error), file=sys.stderr)
+            return 1
+        raise
 
 
 if __name__ == "__main__":

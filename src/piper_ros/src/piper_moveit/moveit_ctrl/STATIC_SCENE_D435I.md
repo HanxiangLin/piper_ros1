@@ -149,8 +149,9 @@ MotionPlanning → Scene Geometry → Show Scene Geometry = true
 
 ```bash
 export PIPER_STATIC_MAP=/home/hank/piper_ws/calibration/eye_in_hand_d435i/session_02/static_scene.bag
+export PIPER_SCENE_PKG="$(rospack find moveit_ctrl)"
 
-rosrun moveit_ctrl static_scene_snapshot.py save \
+/usr/bin/python3 "$PIPER_SCENE_PKG/scripts/static_scene_snapshot.py" save \
   --output "$PIPER_STATIC_MAP"
 ```
 
@@ -162,7 +163,7 @@ rosrun moveit_ctrl static_scene_snapshot.py save \
 ```bash
 rosrun moveit_ctrl static_scan_control.py stop
 
-rosrun moveit_ctrl static_scene_snapshot.py load \
+/usr/bin/python3 "$PIPER_SCENE_PKG/scripts/static_scene_snapshot.py" load \
   --input "$PIPER_STATIC_MAP" \
   --expected-frame base_link \
   --replace
