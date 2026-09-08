@@ -69,20 +69,24 @@ roslaunch piper_with_gripper_moveit piper_real.launch \
   can_port:=can0 auto_enable:=true
 ```
 
-终端二启动 D435i 点云。相机驱动已经运行时不要重复启动，应先停止旧相机 launch：
+终端二启动 D435i 点云。相机驱动已经运行时不要重复启动，应先停止旧相机 launch。
+作用是：启动RealSense D435i驱动，并按照标定和静态扫描所需的分辨率发布彩色图、深度图、相机内参及相机内部TF。
 
 ```bash
 roslaunch moveit_ctrl eye_in_hand_camera.launch enable_pointcloud:=true
 ```
 
-终端三加载已经通过独立验证的 eye-in-hand 外参：
+终端三加载已经通过独立验证的 eye-in-hand 外参。
+注：该launch文件位于普通目录或动态生成目录所以需要"roslaunch /完整路径/文件.launch"来启动。
+作用：发布"link6 → camera_link"的固定 TF 
 
 ```bash
 export PIPER_CALIB_RUN=/home/hank/piper_ws/calibration/eye_in_hand_d435i/session_02
 roslaunch "$PIPER_CALIB_RUN/camera_extrinsics.launch"
 ```
 
-终端四启动扫描门。该节点启动后仍为关闭状态：
+终端四启动扫描门。该节点启动后仍为关闭状态。
+作用：这个launch不是“地图程序”，而是MoveIt静态建图过程中的“受控点云阀门”：打开时积累地图，关闭时冻结地图。
 
 ```bash
 roslaunch moveit_ctrl static_scene_mapping.launch
@@ -171,7 +175,12 @@ MotionPlanning → Scene Geometry → Show Scene Geometry = true
 
 ## 5. 保存、检查和恢复静态 OctoMap
 
-停止扫描后保存。工具拒绝覆盖已有快照：
+停止扫描后保存。工具拒绝覆盖已有快照。
+注：
+【1】 /usr/bin/python3 表示使用ROS Noetic系统Python
+【2】 如果 static_scene.bag 已经存在，必须换一个文件名，例如：
+export PIPER_STATIC_MAP=/home/hank/piper_ws/calibration/eye_in_hand_d435i/session_02/static_scene_02.bag
+作用：保存扫描融合完成后的最终OctoMap快照。
 
 ```bash
 export PIPER_STATIC_MAP=/home/hank/piper_ws/calibration/eye_in_hand_d435i/session_02/static_scene.bag
@@ -185,7 +194,7 @@ export PIPER_SCENE_PKG="$(rospack find moveit_ctrl)"
 Piper URDF通过零平移、零旋转的固定关节连接`dummy_link → base_link`，两者坐标值完全重合；
 RViz继续使用`base_link`作为Fixed Frame即可。
 
-### 5.1 刚刚保存成功：检查当前内存地图
+### 5.1 情况一* 刚刚保存成功：检查当前内存地图
 
 保持原来的 `move_group` 运行，扫描门保持关闭。此时不运行 `load`，只读检查：
 
@@ -219,7 +228,7 @@ MotionPlanning → Planning Request → Start State = Current
 
 地图应与刚才扫描时相同。这里看到的是MoveIt内部Planning Scene，不是单独添加的实时PointCloud2。
 
-### 5.2 仅在以后重启 MoveIt 后恢复
+### 5.2 情况二* 仅在以后重启 MoveIt 后恢复
 
 重启 MoveIt 后，先保证扫描门处于关闭状态，再恢复。`--replace` 是必须的显式确认，
 它表示先清空当前 MoveIt OctoMap，再加载快照：
@@ -227,6 +236,8 @@ MotionPlanning → Planning Request → Start State = Current
 ```bash
 rosrun moveit_ctrl static_scan_control.py stop
 
+export PIPER_SCENE_PKG="$(rospack find moveit_ctrl)"
+export PIPER_STATIC_MAP=/home/hank/piper_ws/calibration/eye_in_hand_d435i/session_02/static_scene.bag
 /usr/bin/python3 "$PIPER_SCENE_PKG/scripts/static_scene_snapshot.py" load \
   --input "$PIPER_STATIC_MAP" \
   --expected-frame dummy_link \
