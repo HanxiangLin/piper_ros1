@@ -1,20 +1,96 @@
 <launch>
+  <!--
+    Piper 实机 MoveIt 总启动文件。
+
+    本文件把以下几层连接起来：
+      1. piper_ctrl_single_node：通过 CAN 与真实机械臂通信；
+      2. 两个 FollowJointTrajectory Action 服务端：把 MoveIt 轨迹转换成 Piper 命令；
+      3. robot_state_publisher：根据实机关节反馈和 URDF 发布机器人 TF；
+      4. demo.launch：加载机器人模型、MoveIt 规划器、实机控制器配置和 RViz。
+
+    主要控制链：
+      MoveIt
+        → /arm_controllers/follow_joint_trajectory
+        → piper_arm_trajectory_controller
+        → /joint_ctrl_single
+        → piper_ctrl_single_node
+        → CAN
+        → 实机
+
+    主要反馈链：
+      实机编码器
+        → CAN
+        → piper_ctrl_single_node
+        → /joint_states
+        → MoveIt、Action 服务端和 robot_state_publisher
+
+    注意：本文件只加载 MoveIt 的点云更新插件，不启动 RealSense、手眼外参
+    或 static_scene_mapping.launch。需要扫描环境时仍须分别启动这些节点。
+  -->
+
+  <!--
+    launch 文件的输入参数。
+    arg 是启动文件的“形参”，可在 roslaunch 命令后用 name:=value 覆盖；
+    arg 本身不会出现在 ROS 参数服务器，只有下面传给 node/include 后才生效。
+  -->
+
+  <!-- SocketCAN 接口名称，例如 can0。 -->
   <arg name="can_port" default="can0" />
+
+  <!--
+    true 表示 Piper 驱动启动后尝试自动使能实机。
+    启动前必须确认急停可用、负载和线缆牢固、机械臂周围无人。
+  -->
   <arg name="auto_enable" default="true" />
+
   <!-- joint7 是单指行程，Piper SDK 使用完整夹爪开口量，因此乘 2。 -->
   <arg name="gripper_val_mutiple" default="2" />
+
+  <!-- false 时不启动 RViz，但 move_group、驱动和 Action 服务端仍会启动。 -->
   <arg name="use_rviz" default="true" />
 
+  <!--
+    底层命令与实机反馈必须使用不同话题：
+      /joint_ctrl_single：发给驱动的六轴目标关节位置；
+      /gripper_ctrl_single：发给驱动的夹爪目标；
+      /joint_states：驱动从真实机械臂读取并发布的测量状态。
+    不可把 command_topic 和 feedback_topic 配成同一个话题，否则目标值可能
+    被误当作实机反馈，Action 的到位判断将失去意义。
+  -->
   <arg name="command_topic" default="/joint_ctrl_single" />
   <arg name="gripper_command_topic" default="/gripper_ctrl_single" />
   <arg name="feedback_topic" default="/joint_states" />
+
+  <!-- Action 服务端对 MoveIt 轨迹进行插值、发命令和检查反馈的频率，单位 Hz。 -->
   <arg name="control_rate" default="50.0" />
+
+  <!--
+    六轴机械臂的默认轨迹跟踪容差：
+      path_tolerance：运动过程中允许的最大关节位置误差，单位 rad；
+      goal_tolerance：终点允许的最大关节位置误差，单位 rad；
+      goal_time_tolerance：计划时长结束后继续等待到位的时间，单位 s；
+      start_tolerance：轨迹首点与实机当前状态允许的差值，单位 rad。
+    轨迹 goal 自带的非零容差优先于这里的默认值。不要仅为“让动作成功”而
+    随意放宽这些数值，应先检查负载、速度、驱动反馈和机械结构。
+  -->
   <arg name="path_tolerance" default="0.50" />
   <arg name="goal_tolerance" default="0.03" />
   <arg name="goal_time_tolerance" default="5.0" />
   <arg name="start_tolerance" default="0.10" />
 
-  <!-- Piper CAN driver: commands and measured state are intentionally separate. -->
+  <!--
+    启动 Piper CAN 驱动。
+
+    $(find piper) 由 rospack 查找 piper 包的绝对路径。
+    include 内部的 arg 会覆盖 start_single_piper.launch 的同名默认参数。
+
+    被包含文件实际启动 piper_ctrl_single_node，并完成以下重映射：
+      节点内部 joint_ctrl_single   → /joint_ctrl_single
+      节点内部 gripper_ctrl_single → /gripper_ctrl_single
+      节点内部 joint_states_single → /joint_states
+
+    因此当前标准实机模式中，命令和测量反馈被明确分离。
+  -->
   <include file="$(find piper)/launch/start_single_piper.launch">
     <arg name="can_port" value="$(arg can_port)" />
     <arg name="auto_enable" value="$(arg auto_enable)" />
@@ -24,6 +100,23 @@
     <arg name="joint_feedback_topic" value="$(arg feedback_topic)" />
   </include>
 
+  <!--
+    六轴机械臂 FollowJointTrajectory Action 服务端。
+
+    这不是 ros_control 的硬件控制器，而是本项目的 Python 适配层：
+      1. 接收 MoveIt 发送的 trajectory_msgs/JointTrajectory；
+      2. 按 time_from_start 在 control_rate 频率下插值；
+      3. 将 joint1 到 joint6 的期望位置发布到 command_topic；
+      4. 从 feedback_topic 读取真实关节位置；
+      5. 发布 Action feedback，并根据路径/终点容差返回成功或失败；
+      6. 收到取消或反馈中断时停止当前目标并保持当前位置。
+
+    action_name 必须与 config/piper_real_moveit_controllers.yaml 中
+    arm_controllers + follow_joint_trajectory 拼出的名称完全一致。
+
+    node 标签内部的 param 是该节点的私有参数，最终名称类似：
+      /piper_arm_trajectory_controller/action_name
+  -->
   <node name="piper_arm_trajectory_controller"
         pkg="piper"
         type="piper_follow_joint_trajectory_server.py"
@@ -38,6 +131,17 @@
     <param name="start_tolerance" value="$(arg start_tolerance)" />
   </node>
 
+  <!--
+    夹爪 FollowJointTrajectory Action 服务端。
+
+    它复用同一个 piper_follow_joint_trajectory_server.py，但 joints 只配置
+    joint7，因此只接受夹爪单关节轨迹。joint7 在 URDF 中是 prismatic 关节，
+    当前位置和容差单位为 m。
+
+    action_name 必须与 MoveIt 控制器配置中的：
+      gripper_controller/follow_joint_trajectory
+    一致。夹爪的路径、终点和起点容差与六轴机械臂分开设置。
+  -->
   <node name="piper_gripper_trajectory_controller"
         pkg="piper"
         type="piper_follow_joint_trajectory_server.py"
@@ -53,15 +157,59 @@
     <param name="start_tolerance" value="0.01" />
   </node>
 
-  <!-- In real/simple mode demo.launch does not create this publisher. -->
+  <!--
+    根据 robot_description 中的 URDF 和 /joint_states 计算机器人各 link 的 TF。
+
+    robot_state_publisher 不产生关节反馈，也不控制机械臂；它只把驱动发布的
+    实机关节状态转换成 dummy_link、base_link、link1 到 link8 等 TF。
+
+    下面 demo.launch 只有在 fake 控制模式下才会自行启动同名节点；当前传入
+    piper_real，所以必须由本文件单独启动。respawn=true 表示异常退出后由
+    roslaunch 重新拉起，但不能修复上游 /joint_states 中断。
+  -->
   <node name="robot_state_publisher"
         pkg="robot_state_publisher"
         type="robot_state_publisher"
         respawn="true"
         output="screen" />
 
+  <!--
+    启动 MoveIt 主体和可视化。
+
+    demo.launch 是 MoveIt Setup Assistant 生成的组合入口，名字虽然包含 demo，
+    但传入 moveit_controller_manager=piper_real 后会跳过 fake controller 和
+    fake joint_state_publisher，使用上面真实驱动发布的 /joint_states。
+
+    demo.launch 将继续完成：
+      1. 加载 URDF、SRDF、joint_limits.yaml 和 KDL 逆解参数；
+      2. 启动 move_group，默认规划管线为 OMPL；
+      3. 通过 MoveItSimpleControllerManager 读取
+         config/piper_real_moveit_controllers.yaml；
+      4. 将 arm 轨迹发送到 /arm_controllers/follow_joint_trajectory；
+      5. 将 gripper 轨迹发送到 /gripper_controller/follow_joint_trajectory；
+      6. 加载 PointCloudOctomapUpdater，监听 /piper/static_scan/points；
+      7. use_rviz=true 时启动 RViz；
+      8. 启动 joint_moveit_ctrl_server，提供额外的 MoveIt ROS Service 接口。
+
+    joint_moveit_ctrl_server 只是方便其他程序通过 Service 提交目标，不是
+    FollowJointTrajectory 服务端，也不是 MoveIt 正常执行轨迹的必经节点。
+  -->
   <include file="$(find piper_with_gripper_moveit)/launch/demo.launch">
     <arg name="moveit_controller_manager" value="piper_real" />
     <arg name="use_rviz" value="$(arg use_rviz)" />
   </include>
+
+  <!--
+    启动完成后的核心接口速查：
+      实机关节反馈：/joint_states
+      六轴底层命令：/joint_ctrl_single
+      夹爪底层命令：/gripper_ctrl_single
+      六轴 Action：/arm_controllers/follow_joint_trajectory
+      夹爪 Action：/gripper_controller/follow_joint_trajectory
+      MoveIt 节点：/move_group
+      静态扫描输入：/piper/static_scan/points
+
+    建议应用程序优先调用 MoveGroupCommander 或 MoveIt Action，不要绕过 MoveIt
+    直接向底层命令话题发布，除非明确希望跳过规划、碰撞检查和轨迹执行反馈。
+  -->
 </launch>
