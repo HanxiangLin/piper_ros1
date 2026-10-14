@@ -1,16 +1,22 @@
 # 瓶子抓取接入 MoveIt：桌面避障与目标接触
 
-核对日期：2026-10-13。
+初次核对日期：2026-10-13。
+启动步骤补充日期：2026-10-14。
 
 分析的原脚本：`/home/hank/competition_ws/piper_ws/src/piper_ros/src/xiaosai/grab2016_5_28_3.py`。
 使用的 MoveIt 工作空间：`/home/hank/piper_ws`，ROS1 Noetic。
 
 本文提供修改步骤和可复制的核心函数，没有改动原比赛脚本，也没有执行实机运动。
-代码中的桌面、瓶子、工具变换、模型路径和夹持判断参数需要实测；这些片段不是已经验证过的实机成品。
+本文采用相机扫描：点云自动估计局部支撑桌面table，其余环境保留为冻结OctoMap。
+目标瓶子在扫描时移走、冻结后放回并独立建模。桌面搜索ROI、不可见厚度、误差余量、
+瓶子尺寸、工具变换和夹持判断参数仍需校验。
+2026-10-14用户已完成真实相机桌面采集并生成table_model.json；
+过滤后环境建图、抓取执行和完整实机避障仍需按后续步骤验证。
 
 ## 1. 要实现的行为
 
-目标检测 → 在 base_link 下生成抓取目标 → MoveIt 对桌面和固定障碍规划 →
+先移走瓶子 → 相机拟合局部table并扫描其余环境 → 冻结非空OctoMap → 放回瓶子 →
+目标检测 → 在 base_link 下生成抓取目标 → MoveIt 对table和环境OctoMap规划 →
 到预抓取位 → 允许两根夹指接触指定瓶子 → 碰撞检查下短距离直线接近 →
 闭合并确认夹持 → 把瓶子附着到 link6 → 竖直抬起 → 携带瓶子规划返回/放置。
 
@@ -51,7 +57,7 @@ rospack find moveit_ctrl
 
 原脚本通过 `rs.pipeline().start()` 直接占用相机，有两种可行方式：
 
-- 保留直接 SDK 检测：先用 ROS 相机完成静态扫描，stop 冻结地图，然后在相机 launch 所在终端 Ctrl+C
+- 保留直接 SDK 检测：先按第3节用 ROS 相机完成桌面拟合与过滤后环境扫描，stop 冻结地图，然后在相机 launch 所在终端 Ctrl+C
   停止 ROS 相机、确认设备释放，再运行抓取脚本。保留 MoveIt、实机驱动和外参发布节点。
   仅关闭扫描门不会释放相机。脚本使用已验证的 link6 到 color optical frame 外参。
 - 后续改成 ROS 图像输入：彩色图、对齐深度图和 CameraInfo 用时间同步方式接收，使用图像时间戳的 TF。
@@ -62,61 +68,886 @@ rospack find moveit_ctrl
 `/home/hank/piper_ws/src/piper_ros/src/bottle_grab/bottle.pt`，但要确认它的类别和实际模型确实匹配。
 必须用能够同时导入 MoveIt 和当前 YOLO/RealSense 依赖的 Python 环境。
 
-## 3. 桌面建模，避免把目标瓶子扫描成障碍
+## 3. 相机扫描建图：自动估计支撑桌面，单独处理目标瓶子
 
-推荐分两步接入：第一版把桌面和抓取区内的全部固定障碍建成命名几何对象，
-使用现有 MoveIt 规划/执行链，在这一区域不依赖 OctoMap 的桌面体素。
-这样支撑桌面、目标瓶子都能单独管理接触权限。
-如果当前已经加载 OctoMap，关闭扫描门并清空前，先确认原地图内所有相关固定障碍
-都有完整的几何替代；清空是清掉整张地图，不是只删瓶子，不能因此丢失其他障碍。
+采用相机扫描方案后，场景由两部分组成：
 
-第二版再组合点云地图：移走所有待抓瓶子，扫描其余固定环境，stop 冻结地图，
-然后把瓶子放回。桌面抓取区应由命名 box 可靠覆盖，进入地图前分割掉该区桌面点，
-避免同一支撑面同时以 box 和不可单独管理接触的体素表示。
-如果分割还不能可靠实现，先使用覆盖完整环境的几何对象版本。
-对每个瓶子建立独立几何模型，只有当前目标获得夹指接触权限。
-
-已有地图如果包含瓶子，单独给 `target_bottle` 设置 ACM 不会消除瓶子原位置的 OctoMap 体素。
-那些体素属于 `<octomap>`，不属于命名对象。已有 `static_scene.bag` 不能未经检查直接复用。
-
-如果瓶子不能移走，需在送入 OctoMap 前分割目标点云，或精确清理属于目标的体素。
-清理范围不能挖掉桌面/桌边，普通 `PlanningSceneInterface.remove_world_object()` 不能删除 OctoMap 的局部区域。
-不要设置“夹爪可以碰整个 OctoMap”，也不要关闭全部碰撞检查。
-
-除了点云地图，建议增加有限尺寸桌面 box，使桌边和桌板厚度更可靠。
-桌面 box 至少覆盖真实台面和桌板厚度；桌腿、横梁、挡板、桌裙按实际几何另加 box。
-不能只添加一个无厚度平面而忽略桌边下方的结构。
-
-所有桌面尺寸都以 base_link 表示。下例假设桌子边缘平行于基坐标系 X/Y；
-如果桌子旋转，先用实测桌子坐标系与 TF 给 box 设置正确姿态。
-
-```python
-# 加入 PiperVisionController 类；单位 m。
-def add_table(self, x_min, x_max, y_min, y_max, z_bottom, z_top,
-              margin_xy, margin_z):
-    if not (x_max > x_min and y_max > y_min and z_top > z_bottom):
-        raise ValueError("桌面边界无效")
-    if margin_xy < 0 or margin_z < 0:
-        raise ValueError("桌面余量不能为负")
-    pose = PoseStamped()
-    pose.header.frame_id = "base_link"
-    pose.pose.orientation.w = 1.0
-    pose.pose.position.x = (x_min + x_max) / 2.0
-    pose.pose.position.y = (y_min + y_max) / 2.0
-    # 上下各膨胀 margin_z，因此中心保持在原桌板中心。
-    pose.pose.position.z = (z_bottom + z_top) / 2.0
-    self.scene.add_box(
-        "table", pose,
-        size=(x_max - x_min + 2 * margin_xy,
-              y_max - y_min + 2 * margin_xy,
-              z_top - z_bottom + 2 * margin_z))
-    self.wait_object("table", known=True, attached=False)
+```text
+相机点云 → 按采集时刻TF转换并拟合抓取区桌面 → 自动生成命名对象table
+相机点云 → 去掉已由table包络替代的点 → static_scan_gate → 环境OctoMap
+待抓瓶子 → 建图时移走，冻结地图后放回 → 视觉检测 → 独立对象target_bottle
 ```
 
-余量根据外参误差、桌面测量误差、模型误差和轨迹跟踪误差选择；不能把任意固定厘米数当成保证。
-如果机械臂固定在同一张桌上，box 不得错误地包住实际底座安装体积。
-按安装结构建模，必要时只为真实固定接触的底座 link 与桌子建立窄范围例外；
-手臂、手腕、夹指不能获得桌面碰撞例外。
+`table` 的位置和可见范围从点云计算，不再手工填写桌面中心、长宽或世界位姿。
+其他桌面、桌边、桌腿、箱子等通过剩余点云进入 OctoMap。
+保留命名 `table` 是为了第10节能只处理目标瓶底与局部支撑面的接触，
+同时保留夹指/手臂与所有障碍的碰撞检查。
+
+**先移走所有待抓瓶子再扫描，冻结后放回，是本版采用的目标分离方法。**
+下面没有实现“瓶子留在桌上时自动分割瓶子”的功能。若比赛条件不允许移走瓶子，
+需要先增加目标分割及其遗漏检查，再使用这条流程；不能让带瓶子的旧地图直接进入抓取。
+
+本节给出需要创建的完整示例代码。当前已有功能只有相机、TF、扫描门、OctoMap和快照；
+新的桌面估计/过滤脚本还需要按下文创建，不会因为修改本文而自动安装。
+
+### 3.1 新增文件与参数：不再手动输入桌面模型
+
+需要创建：
+
+| 文件 | 作用 |
+|---|---|
+| `piper_moveit/moveit_ctrl/config/camera_table_scan.yaml` | 搜索桌面的ROI、拟合阈值、包络余量 |
+| `piper_moveit/moveit_ctrl/scripts/camera_table_scene.py` | 采集拟合、加载table、过滤点云三个子命令 |
+| `calibration/bottle_grasp_scan/scan_01/table_model.json` | 程序生成的桌面结果，勿手填位置/尺寸 |
+| `calibration/bottle_grasp_scan/scan_01/environment.bag` | 已有快照工具保存的环境OctoMap |
+
+前两个路径相对于 `/home/hank/piper_ws/src/piper_ros/src/`；
+后两个路径相对于 `/home/hank/piper_ws/`。
+
+```bash
+mkdir -p /home/hank/piper_ws/src/piper_ros/src/piper_moveit/moveit_ctrl/config
+mkdir -p /home/hank/piper_ws/calibration/bottle_grasp_scan/scan_01
+```
+
+新建 `camera_table_scan.yaml`，填写如下配置：
+
+```yaml
+input_cloud: /camera/depth/color/points
+
+# base_link下的桌面搜索区域，不是最终桌面模型。
+# [X最小值, Y最小值, Z最小值] / [X最大值, Y最大值, Z最大值]，单位m。
+# 选择能覆盖抓取支撑区域、又排除地板和机械臂本体的范围。
+roi_min: [MEASURE, MEASURE, MEASURE]
+roi_max: [MEASURE, MEASURE, MEASURE]
+
+# 桌板向下的保守包络深度。相机只看见上表面时不能自动推断厚度。
+# 用实际桌板厚度或已经确认覆盖相关桌板结构的深度，单位m。
+support_depth_m: MEASURE
+
+# 根据深度噪声、外参、模型和跟踪误差选择余量，单位m。
+edge_padding_m: MEASURE
+mask_padding_m: MEASURE
+
+# 以下为算法起始设置，须用实际点云检查，不是精度保证。
+plane_threshold_m: 0.006
+voxel_m: 0.008
+max_tilt_deg: 3.0
+min_inliers: 300
+min_inlier_ratio: 0.35
+ransac_iterations: 200
+max_age_s: 0.75
+```
+
+这里仍需指定大致搜索范围、误差余量以及相机未观察到的桌板厚度，
+不需要逐项手量桌面的中心、长宽和姿态。`MEASURE` 必须改为数字，代码会拒绝占位值。
+Z是相对 base_link 的坐标，不是离地高度；先在RViz查看基座原点与坐标轴。
+ROI中的最大近水平面应确实是目标支撑桌面，不能覆盖另一层板或地板后直接自动认定。
+
+程序用近水平平面拟合，然后产生轴对齐的保守包络。
+它不是完整桌子重建：只替代观察到的局部支撑区域，未覆盖部分仍由环境OctoMap表示。
+桌面明显倾斜、安装缺口、弧形桌板、近邻重叠平面等情况需要扩展几何算法。
+如果局部包络错误地包住真实底座安装体积，应调整有效ROI或实现安装缺口模型，
+不能通过允许整个手臂碰桌解决。
+
+### 3.2 完整相机处理脚本
+
+新建：
+
+```text
+/home/hank/piper_ws/src/piper_ros/src/piper_moveit/moveit_ctrl/scripts/camera_table_scene.py
+```
+
+下面代码提供 `collect`、`load`、`filter` 三个子命令，均不控制机械臂。
+它使用本机已有的 NumPy、tf2_ros、tf.transformations 和ROS消息，
+不依赖本机未安装的 `tf2_sensor_msgs`。
+
+```python
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+"""相机估计局部支撑桌面，加载table，并转发其余点云；不控制机械臂。"""
+import argparse
+import copy
+import json
+import math
+from pathlib import Path
+import sys
+import threading
+import time
+
+import numpy as np
+import rospy
+import tf2_ros
+import tf.transformations as tf_trans
+from geometry_msgs.msg import Pose
+from moveit_msgs.msg import CollisionObject, PlanningScene, PlanningSceneComponents
+from moveit_msgs.srv import ApplyPlanningScene, GetPlanningScene, GetPlanningSceneRequest
+from sensor_msgs.msg import PointCloud2
+from sensor_msgs import point_cloud2 as pc2
+from shape_msgs.msg import SolidPrimitive
+
+
+def numeric(value, label):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(label + " 必须填有限数字，不能保留MEASURE")
+    value = float(value)
+    if not math.isfinite(value):
+        raise ValueError(label + " 包含非有限数值")
+    return value
+
+
+def numbers(value, count, label):
+    if not isinstance(value, list) or len(value) != count:
+        raise ValueError(label + " 长度错误")
+    return np.array([numeric(v, label) for v in value], dtype=float)
+
+
+def check_config(config):
+    lo = numbers(config["roi_min"], 3, "roi_min")
+    hi = numbers(config["roi_max"], 3, "roi_max")
+    if np.any(hi <= lo):
+        raise ValueError("roi_max必须大于roi_min")
+    for key in ("support_depth_m", "plane_threshold_m", "voxel_m", "max_age_s"):
+        if numeric(config[key], key) <= 0:
+            raise ValueError(key + " 必须大于0")
+    for key in ("edge_padding_m", "mask_padding_m"):
+        if numeric(config[key], key) < 0:
+            raise ValueError(key + " 不能为负")
+    if not 0 < numeric(config["max_tilt_deg"], "max_tilt_deg") <= 10:
+        raise ValueError("此示例仅处理近水平桌面，max_tilt_deg必须在(0,10]内")
+    if not 0 < numeric(config["min_inlier_ratio"], "min_inlier_ratio") <= 1:
+        raise ValueError("min_inlier_ratio必须在(0,1]内")
+    for key in ("min_inliers", "ransac_iterations"):
+        value = config[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 3:
+            raise ValueError(key + " 必须是至少3的整数")
+    if not isinstance(config["input_cloud"], str) or not config["input_cloud"]:
+        raise ValueError("input_cloud为空")
+
+
+def inside(points, lower, upper):
+    return np.all((points >= lower) & (points <= upper), axis=1)
+
+
+def xyz_to_base(points, transform):
+    q = transform.transform.rotation
+    matrix = tf_trans.quaternion_matrix([q.x, q.y, q.z, q.w])
+    t = transform.transform.translation
+    return points @ matrix[:3, :3].T + [t.x, t.y, t.z]
+
+
+def downsample(points, voxel_m):
+    if not len(points):
+        return points
+    cells = np.floor(points / voxel_m).astype(np.int64)
+    _, indices = np.unique(cells, axis=0, return_index=True)
+    return points[indices]
+
+
+def fit_table(points, config):
+    check_config(config)
+    points = points[np.isfinite(points).all(axis=1)]
+    points = points[inside(points, np.array(config["roi_min"]),
+                           np.array(config["roi_max"]))]
+    points = downsample(points, config["voxel_m"])
+    rng = np.random.default_rng(42)
+    if len(points) > 30000:
+        points = points[rng.choice(len(points), 30000, replace=False)]
+    if len(points) < config["min_inliers"]:
+        raise RuntimeError("ROI内点不足；检查TF、ROI和扫描覆盖")
+    threshold = config["plane_threshold_m"]
+    cosine = math.cos(math.radians(config["max_tilt_deg"]))
+    best = None
+    for _ in range(config["ransac_iterations"]):
+        a, b, c = points[rng.choice(len(points), 3, replace=False)]
+        normal = np.cross(b - a, c - a)
+        norm = np.linalg.norm(normal)
+        if norm < 1e-9:
+            continue
+        normal /= norm
+        if normal[2] < 0:
+            normal = -normal
+        if normal[2] < cosine:
+            continue
+        offset = -np.dot(normal, a)
+        inliers = np.abs(points @ normal + offset) <= threshold
+        if best is None or inliers.sum() > best.sum():
+            best = inliers
+    if best is None or best.sum() < config["min_inliers"]:
+        raise RuntimeError("未找到足够大的近水平平面")
+    if best.mean() < config["min_inlier_ratio"]:
+        raise RuntimeError("平面占比不足；缩小到真实桌面ROI或改善扫描")
+    selected = points[best]
+    center = selected.mean(axis=0)
+    _, _, vt = np.linalg.svd(selected - center, full_matrices=False)
+    normal = vt[-1]
+    if normal[2] < 0:
+        normal = -normal
+    if normal[2] < cosine:
+        raise RuntimeError("拟合后桌面倾角超限")
+    offset = -np.dot(normal, center)
+    selected = points[np.abs(points @ normal + offset) <= threshold]
+    if len(selected) < config["min_inliers"]:
+        raise RuntimeError("精修后平面点不足")
+    if len(selected) / len(points) < config["min_inlier_ratio"]:
+        raise RuntimeError("精修后平面占比不足")
+    span = np.ptp(selected[:, :2], axis=0)
+    if np.any(span < 0.05):
+        raise RuntimeError("桌面可见范围太小，重新采集")
+    lower = selected.min(axis=0)
+    upper = selected.max(axis=0)
+    lower[:2] -= config["edge_padding_m"]
+    upper[:2] += config["edge_padding_m"]
+    lower[2] -= config["support_depth_m"] + config["mask_padding_m"]
+    upper[2] += config["mask_padding_m"]
+    return {
+        "version": 1, "frame_id": "base_link", "object_id": "table",
+        "bounds_min": lower.tolist(), "bounds_max": upper.tolist(),
+        "plane_normal": normal.tolist(), "plane_offset": float(offset),
+        "inlier_count": len(selected), "sample_count": len(points),
+        "note": "局部支撑桌面包络；其余桌面/结构仍由OctoMap表示",
+    }
+
+
+def read_model(path):
+    model = json.loads(Path(path).read_text())
+    if (model.get("version") != 1 or model.get("frame_id") != "base_link"
+            or model.get("object_id") != "table"):
+        raise ValueError("桌面模型版本、frame或ID无效")
+    lower = numbers(model["bounds_min"], 3, "bounds_min")
+    upper = numbers(model["bounds_max"], 3, "bounds_max")
+    if np.any(upper <= lower):
+        raise ValueError("桌面模型边界无效")
+    normal = numbers(model["plane_normal"], 3, "plane_normal")
+    if abs(np.linalg.norm(normal) - 1) > 1e-3 or normal[2] <= 0:
+        raise ValueError("桌面平面法向无效")
+    numeric(model["plane_offset"], "plane_offset")
+    return model, lower, upper
+
+
+def make_table(lower, upper):
+    obj = CollisionObject()
+    obj.id = "table"
+    obj.header.frame_id = "base_link"
+    obj.pose.orientation.w = 1.0
+    obj.operation = CollisionObject.ADD
+    primitive = SolidPrimitive()
+    primitive.type = SolidPrimitive.BOX
+    primitive.dimensions = (upper - lower).tolist()
+    pose = Pose()
+    pose.position.x, pose.position.y, pose.position.z = (lower + upper) / 2
+    pose.orientation.w = 1.0
+    obj.primitives = [primitive]
+    obj.primitive_poses = [pose]
+    return obj
+
+
+def load_table(path):
+    _, lower, upper = read_model(path)
+    for name in ("/apply_planning_scene", "/get_planning_scene"):
+        rospy.wait_for_service(name, timeout=10)
+    diff = PlanningScene()
+    diff.is_diff = True
+    diff.robot_state.is_diff = True
+    diff.world.collision_objects = [make_table(lower, upper)]
+    if not rospy.ServiceProxy("/apply_planning_scene", ApplyPlanningScene)(diff).success:
+        raise RuntimeError("MoveIt拒绝桌面模型")
+    request = GetPlanningSceneRequest()
+    request.components.components = PlanningSceneComponents.WORLD_OBJECT_GEOMETRY
+    scene = rospy.ServiceProxy("/get_planning_scene", GetPlanningScene)(request).scene
+    objects = {obj.id: obj for obj in scene.world.collision_objects}
+    if "table" not in objects:
+        raise RuntimeError("table未同步到MoveIt")
+    stored = objects["table"]
+    if (len(stored.primitives) != 1 or stored.primitives[0].type != SolidPrimitive.BOX
+            or not np.allclose(stored.primitives[0].dimensions, upper - lower,
+                               rtol=0, atol=1e-6)):
+        raise RuntimeError("table几何与模型文件不一致")
+    rospy.loginfo("table已加载；在RViz核对位置和覆盖范围，没有发送运动命令")
+
+
+class CloudProcessor:
+    def __init__(self, config, mode, model_path=None):
+        self.config = config
+        self.mode = mode
+        self.buffer = tf2_ros.Buffer()
+        self.listener = tf2_ros.TransformListener(self.buffer)
+        self.lock = threading.Lock()
+        self.samples = []
+        self.collecting = True
+        self.last_sample = -1.0
+        if mode == "filter":
+            _, self.lower, self.upper = read_model(model_path)
+            self.publisher = rospy.Publisher(
+                "/piper/table_scan/environment_points", PointCloud2, queue_size=1)
+        self.subscriber = rospy.Subscriber(
+            config["input_cloud"], PointCloud2, self.on_cloud, queue_size=1,
+            buff_size=32 * 1024 * 1024)
+
+    def on_cloud(self, message):
+        try:
+            age = (rospy.Time.now() - message.header.stamp).to_sec()
+            if (not message.header.frame_id or message.header.stamp.to_sec() <= 0
+                    or age < -0.1 or age > self.config["max_age_s"]):
+                raise RuntimeError("点云无frame/时间戳无效/过旧")
+            if self.mode == "collect" and time.monotonic() - self.last_sample < 0.5:
+                return
+            transform = self.buffer.lookup_transform(
+                "base_link", message.header.frame_id, message.header.stamp,
+                rospy.Duration(0.15))
+            source = np.array(list(pc2.read_points(
+                message, field_names=("x", "y", "z"), skip_nans=True)),
+                dtype=float).reshape(-1, 3)
+            source = source[np.isfinite(source).all(axis=1)]
+            base = xyz_to_base(source, transform)
+            if self.mode == "collect":
+                selected = base[inside(base, np.array(self.config["roi_min"]),
+                                      np.array(self.config["roi_max"]))]
+                selected = downsample(selected, self.config["voxel_m"])
+                # 每帧限制内存；最终还会再体素降采样。
+                if len(selected) > 5000:
+                    selected = selected[np.linspace(0, len(selected) - 1,
+                                                     5000, dtype=int)]
+                with self.lock:
+                    if self.collecting and len(selected):
+                        self.samples.append(selected)
+                        self.last_sample = time.monotonic()
+            else:
+                # 只去掉与命名table几何完全重合的空间，几何仍阻挡机器人。
+                keep = ~inside(base, self.lower, self.upper)
+                if (rospy.Time.now() - message.header.stamp).to_sec() > self.config["max_age_s"]:
+                    raise RuntimeError("处理后点云过旧，丢弃这一帧")
+                # 必须保留传感器frame与采集时间；不能改成base_link或重新打时间戳。
+                output = pc2.create_cloud_xyz32(copy.deepcopy(message.header),
+                                               source[keep].tolist())
+                self.publisher.publish(output)
+        except (RuntimeError, ValueError, tf2_ros.TransformException) as error:
+            rospy.logwarn_throttle(2.0, "相机桌面处理跳过一帧: %s", error)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("command", choices=("collect", "load", "filter"))
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--seconds", type=float, default=60)
+    args = parser.parse_args(rospy.myargv(argv=sys.argv)[1:])
+    rospy.init_node("camera_table_scene", anonymous=True)
+    if args.command == "load":
+        load_table(args.model)
+        return
+    config = rospy.get_param("/camera_table_scan")
+    check_config(config)
+    if args.command == "filter":
+        processor = CloudProcessor(config, "filter", args.model)
+        rospy.loginfo("桌面过滤启动，保持原始sensor frame和采集时间戳")
+        rospy.spin()
+        return
+    if not math.isfinite(args.seconds) or not 1 <= args.seconds <= 300:
+        raise ValueError("采集时间必须在1～300秒内")
+    path = Path(args.model).expanduser().absolute()
+    if path.exists():
+        raise ValueError("模型文件已存在，换新文件名避免覆盖")
+    processor = CloudProcessor(config, "collect")
+    rospy.loginfo("开始采集%.1f秒；仅在已确认安全的视角停稳采集", args.seconds)
+    deadline = time.monotonic() + args.seconds
+    while not rospy.is_shutdown() and time.monotonic() < deadline:
+        rospy.sleep(0.1)
+    if rospy.is_shutdown():
+        raise RuntimeError("采集被取消，未保存模型")
+    processor.subscriber.unregister()
+    with processor.lock:
+        processor.collecting = False
+        samples = list(processor.samples)
+    if not samples:
+        raise RuntimeError("没有有效ROI点云；检查相机、时间戳、TF和ROI")
+    model = fit_table(np.vstack(samples), config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x") as stream:
+        json.dump(model, stream, ensure_ascii=False, indent=2, allow_nan=False)
+    rospy.loginfo("桌面模型已保存: %s；平面点=%d，需在RViz核对", path, model["inlier_count"])
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ValueError, KeyError, RuntimeError, OSError, rospy.ROSException) as error:
+        rospy.logerr("相机桌面流程失败: %s", error)
+        sys.exit(1)
+```
+
+说明两个关键实现点：
+
+- 程序在 base_link 下判断哪些点位于自动拟合的 `table` 包络中，
+  但输出点云仍使用**原相机坐标值、原frame、原采集时间戳**。
+  MoveIt做射线更新需要正确的传感器原点，不能直接把输出frame改为base_link。
+- 被移除的点所在空间全部由同一个 `table` box覆盖。
+  并未把这些位置当作自由空间；其他点仍原样进入环境地图。
+  若ROI/包络选错，会造成过度保守或错误识别，需要在RViz验证。
+
+示例过滤器只保留XYZ字段，足够供当前OctoMap更新器使用；它不转发RGB等附加字段。
+它只做桌面包络替代，不能代替目标瓶子分割或完整的机器人自体过滤。
+环境建图时机器人自体过滤仍由原MoveIt更新器处理。
+
+### 3.3 第一阶段：启动机械臂、相机和外参，再采集桌面
+
+本节按终端给出完整启动顺序，不需要先跳到第11节找launch命令。
+先移走待抓瓶子，让机械臂处于已经确认安全、相机能看到桌面上表面的停稳姿态。
+
+| 终端 | 运行内容 | 何时启动、是否保持运行 |
+|---|---|---|
+| 终端1 | Piper实机驱动、MoveIt、机械臂TF | 采集前启动；整个建图/抓取阶段保持运行 |
+| 终端2 | RealSense图像、点云、相机内部TF | 采集前启动；直接SDK检测时在冻结地图后停止释放相机 |
+| 终端3 | 已标定的link6→camera_link外参 | 采集前启动；相机安装未改变时保持运行 |
+| 终端4 | 参数加载、collect、load、扫描门控制和保存 | 短命令执行完返回提示符，可以继续下一条 |
+| 终端5 | 桌面点云过滤器 | 第3.4节才启动；环境扫描期间保持运行 |
+| 终端6 | 静态扫描门launch | 第3.4节才启动；默认关闭，控制由终端4执行 |
+
+#### 3.3.1 所有终端先加载同一ROS环境
+
+每新开一个终端，都先运行：
+
+```bash
+# 如果提示符有(base)或其他已激活的Conda环境，先执行conda deactivate。
+source /opt/ros/noetic/setup.bash
+source /home/hank/piper_ws/devel/setup.bash
+```
+
+不要在这些终端再source比赛工作空间。检查包路径：
+
+```bash
+rospack find piper_with_gripper_moveit
+rospack find moveit_ctrl
+```
+
+应指向 `/home/hank/piper_ws/src/...`。所有终端使用同一个ROS master；
+这些roslaunch会按需启动master，不需要再启动另一份roscore。
+
+#### 3.3.2 终端1：确认CAN，再启动实机MoveIt和机械臂TF
+
+先只读检查CAN：
+
+```bash
+ip -br link show type can
+ip -details link show can0
+```
+
+必须存在这次机械臂使用的真实接口，且配置正确。项目使用1 Mbps。
+如果真实接口叫 `can_piper` 等其他名字，后面 `can_port` 改成对应名称。
+若没有任何CAN接口，先检查USB-CAN连接和系统识别；不要继续启动驱动。
+
+如果只有一个CAN适配器、确认它属于Piper且需要初始化，在没有其他驱动使用它时执行：
+
+```bash
+bash /home/hank/piper_ws/src/piper_ros/can_activate.sh can0 1000000
+```
+
+这个命令需要系统已识别到接口，必要时在本地终端输入sudo密码。
+它配置并启用CAN，不发送机械臂运动目标；接口已经正确时不需要重复配置。
+
+然后在终端1启动：
+
+```bash
+roslaunch piper_with_gripper_moveit piper_real.launch \
+  can_port:=can0 auto_enable:=false
+```
+
+作用是启动实机驱动、真实关节反馈、两个轨迹Action服务端、
+`robot_state_publisher`、MoveIt和RViz，提供 `base_link→link6` 的机械臂TF。
+`auto_enable:=false`表示启动时不自动请求电机使能，也不会把已经使能的电机自动禁用。
+这条命令本身不提交扫描或抓取轨迹；后续实际运动的使能与执行按已验证的实机流程处理。
+
+当前只采集桌面时，不要为补TF启动fake关节发布器，或用全零静态变换伪造机械臂姿态。
+如果本launch已经正确运行，保留该终端，不要再启动第二份CAN驱动。
+确认没有 `CAN socket ... does not exist` 或 `piper_ctrl_single_node ... process has died`。
+
+#### 3.3.3 终端2：启动RealSense相机，明确开启点云
+
+```bash
+roslaunch moveit_ctrl eye_in_hand_camera.launch enable_pointcloud:=true
+```
+
+作用是发布图像、深度点云和 `camera_link→相机光学frame` 的内部TF。
+`enable_pointcloud:=true`必须带上，因为该launch默认不开启点云。
+此launch不启动机械臂，也不发布手眼外参；不要只启动它就运行collect。
+相机已经由ROS节点打开时不重复启动，也不要同时运行直接SDK开相机的旧抓取脚本。
+
+#### 3.3.4 终端3：启动已验证的手眼外参
+
+```bash
+roslaunch \
+  /home/hank/piper_ws/calibration/eye_in_hand_d435i/session_02/camera_extrinsics.launch
+```
+
+作用是发布 `link6→camera_link`，把机械臂TF树与相机TF树接起来。
+仅在相机安装、支架和所选安装link与该标定一致时使用。
+已经运行该外参节点时不要重复启动；同一个相机不能同时有两个不同的父变换。
+
+#### 3.3.5 终端4：检查点云和完整TF，确认后再collect
+
+终端1、2、3都保持运行。在已加载ROS环境的终端4执行：
+
+```bash
+# 真实关节反馈应有joint1～joint6等模型关节名。
+timeout 5s rostopic echo -n 1 /joint_states
+
+# 应有真实相机发布者；header有非零时间戳和frame_id。
+rostopic info /camera/depth/color/points
+timeout 5s rostopic echo -n 1 /camera/depth/color/points/header
+
+# 先检查机械臂链，再检查连接相机后的完整链。
+timeout 5s rosrun tf tf_echo base_link link6
+timeout 5s rosrun tf tf_echo base_link camera_depth_optical_frame
+```
+
+本次实际点云header为 `camera_depth_optical_frame`，所以最后一条使用这个frame。
+若以后点云header改变，改成实际frame，而不是修改collect内部的基座坐标系。
+`tf_echo`正常时应持续输出平移和旋转；这里timeout用于结束持续检查，
+超时退出码本身不代表故障，判断依据是它是否已经输出有效变换。
+
+完整链应为：
+
+```text
+base_link → link1 → … → link6
+                          → camera_link → camera_depth_frame → camera_depth_optical_frame
+```
+
+若只存在固定关节、没有 `base_link→link6`，检查驱动是否退出、
+`/joint_states`是否是实际反馈、关节名字是否匹配；不要改ROI来掩盖TF问题。
+
+本阶段**不打开扫描门**。若旧扫描门已运行，先在终端4执行：
+
+```bash
+# 仅在旧扫描门节点已经运行时执行；没有启动时无需执行。
+rosrun moveit_ctrl static_scan_control.py stop
+```
+
+加载配置、核对实际ROI，然后采集：
+
+```bash
+rosparam load \
+  /home/hank/piper_ws/src/piper_ros/src/piper_moveit/moveit_ctrl/config/camera_table_scan.yaml \
+  /camera_table_scan
+
+rosparam get /camera_table_scan
+
+/usr/bin/python3 \
+  /home/hank/piper_ws/src/piper_ros/src/piper_moveit/moveit_ctrl/scripts/camera_table_scene.py \
+  collect \
+  --model /home/hank/piper_ws/calibration/bottle_grasp_scan/scan_01/table_model.json \
+  --seconds 20
+```
+
+程序采集20秒并生成JSON，不会自动移动机械臂。静止姿态应能看到足够大的桌面区域；
+需要多个视角时，可延长采集时间并仅使用已经确认安全的换姿方式，停稳后采集。
+尚未建立完整地图时，不能依赖未知环境中的自动避障完成扫描换姿。
+
+**2026-10-14本次采集已经成功，`scan_01/table_model.json`已存在：
+现在可以跳过上面的collect，直接执行下面的load。**
+程序拒绝覆盖同名文件；以后重新采集使用 `scan_02` 等新目录，
+并同步修改后续load、filter、快照和抓取命令的路径，不能混用不同批次模型。
+
+本次修正后实际使用的局部搜索范围为：
+
+```yaml
+roi_min: [0.15, -0.30, -0.13]
+roi_max: [0.65,  0.30, -0.07]
+```
+
+它覆盖本次点云中约 `Z=-0.098 m` 的表面，不是跨场景通用默认值。
+桌子、基座或相机安装改变后重新核对。修改YAML后必须重新 `rosparam load`。
+启动采集时偶发第一帧早于新TF缓冲区的警告，随后恢复时只表示该帧被丢弃；
+持续TF错误需要处理后再采集。
+
+如果采集被Ctrl+C取消，不保存模型。使用绝对路径执行无需修改CMakeLists.txt、
+无需chmod或重新编译。拟合成功不代表桌面识别、覆盖和实机避障已全部验证。
+
+然后在**终端4**把本次自动结果加载到仍在运行的MoveIt：
+
+```bash
+/usr/bin/python3 \
+  /home/hank/piper_ws/src/piper_ros/src/piper_moveit/moveit_ctrl/scripts/camera_table_scene.py \
+  load \
+  --model /home/hank/piper_ws/calibration/bottle_grasp_scan/scan_01/table_model.json
+```
+
+在RViz设 `Fixed Frame=base_link`、打开 `Show Scene Geometry`，
+核对 `table` 的上表面和覆盖范围。最终抓取位置及瓶子的整个支撑接触区域应在包络内，
+与包络侧边留出体素和定位误差余量。确认后才进入第3.4节环境扫描。
+
+### 3.4 第二阶段：过滤局部桌面，再扫描其余环境
+
+保留第3.3节的终端1（机械臂/MoveIt）、终端2（相机）、终端3（外参）。
+以下两个程序各占一个新终端，启动后保持运行；两个终端也先source第3.3.1节的ROS环境。
+
+**终端5：启动桌面点云过滤器。**
+
+```bash
+/usr/bin/python3 \
+  /home/hank/piper_ws/src/piper_ros/src/piper_moveit/moveit_ctrl/scripts/camera_table_scene.py \
+  filter \
+  --model /home/hank/piper_ws/calibration/bottle_grasp_scan/scan_01/table_model.json
+```
+
+**终端6：启动静态扫描门，输入指定为过滤后的点云。**
+如果原 `static_scene_mapping.launch` 正在运行，先在其终端Ctrl+C停止旧扫描门，
+再按下面命令启动。不要同时运行两份扫描门。
+
+```bash
+roslaunch moveit_ctrl static_scene_mapping.launch \
+  input_cloud:=/piper/table_scan/environment_points
+```
+
+原 `sensors_3d.yaml` 继续监听 `/piper/static_scan/points`，不需要改成原始相机话题。
+这次实际输入链是：
+
+```text
+/camera/depth/color/points
+→ camera_table_scene.py filter
+→ /piper/table_scan/environment_points
+→ static_scan_gate
+→ /piper/static_scan/points
+→ MoveIt OctoMap
+```
+
+**终端4：检查过滤点云与扫描门。**
+先确认过滤器有输出，扫描门默认关闭，目标瓶子仍未放回：
+
+```bash
+rostopic hz /piper/table_scan/environment_points
+rostopic info /piper/static_scan/points
+rosrun moveit_ctrl static_scan_control.py status
+```
+
+`/piper/static_scan/points` 应只有受控扫描门发布，不能再有绕过过滤器的原始点云发布源。
+如果过滤器不断报TF/时间戳错误，先修复；不能用最新TF或新时间戳强行绕过检查。
+处理耗时超过0.75秒会丢弃帧，需要改善处理负载/输入频率，不能把过旧云当成即时观测。
+
+重新建图之前：在机器人停稳且不进行任何任务规划/执行的阶段，确认将重新扫描全部相关环境。
+下面clear会清掉整张旧OctoMap，用于去除旧桌面/瓶子体素；**不是抓取前清空环境地图**。
+命名 `table` 对象保留；保持终端1、2、3、5、6运行，
+在**终端4**依次开启扫描、多视角采集、停止：
+
+```bash
+rosrun moveit_ctrl static_scan_control.py stop
+rosrun moveit_ctrl static_scan_control.py clear
+rosrun moveit_ctrl static_scan_control.py start
+# 在已确认安全的多个视角停稳采集；保持瓶子移走。
+rosrun moveit_ctrl static_scan_control.py stop
+rosrun moveit_ctrl static_scan_control.py status
+```
+
+确认 `enabled=false`、`session_forwarded>0`，并在停止转发后等待地图更新稳定。
+在RViz检查：命名table位置正确，桌面外部、桌边、桌腿及固定障碍体素正确；
+局部替代区域没有旧的重复桌面占据体素，目标瓶子位置没有瓶子体素。
+2cm体素可能跨过局部包络边界，碰撞仍按实际地图检查，不能靠忽略整个OctoMap消除。
+
+**扫描完成后保留非空OctoMap。**本方案抓取前会检查它非空、frame正确且冻结。
+如果只看到了被过滤的局部桌面导致地图为空，应补扫周边桌面/桌边/相关固定障碍，
+不能直接删掉地图检查；本流程要求对相关环境有实际扫描覆盖。
+没有观测到的区域不能因缺少占据体素就认为安全。
+
+### 3.5 放回瓶子、保存和重启恢复
+
+确认冻结后再放回待抓瓶子，此后不再start扫描门。
+瓶子由第7节的检测结果创建独立对象：目标为 `target_bottle`，
+其他可能进入运动范围的瓶子也应有各自的碰撞对象。
+若不能移走瓶子，当前流程尚不适用：需要实现目标实例分割并检查遗漏后再扫描，
+不能只设置 `target_bottle` 的ACM、期待旧瓶子体素自动消失。
+
+保存这次环境地图：
+
+```bash
+/usr/bin/python3 \
+  /home/hank/piper_ws/src/piper_ros/src/piper_moveit/moveit_ctrl/scripts/static_scene_snapshot.py \
+  save --output /home/hank/piper_ws/calibration/bottle_grasp_scan/scan_01/environment.bag
+```
+
+`environment.bag` 和 `table_model.json` 必须成对保留在同一个扫描目录。
+已有快照工具只保存OctoMap，不保存命名 `table`、瓶子、ACM或完整Planning Scene。
+`save`不清空当前地图；保存后可以直接使用当前场景，不需要再load。
+
+以后重启MoveIt，只有环境、底座、安装及TF均未改变时才恢复同一对文件：
+
+```bash
+# 先确认扫描门关闭，再恢复table。
+/usr/bin/python3 \
+  /home/hank/piper_ws/src/piper_ros/src/piper_moveit/moveit_ctrl/scripts/camera_table_scene.py \
+  load --model /home/hank/piper_ws/calibration/bottle_grasp_scan/scan_01/table_model.json
+
+/usr/bin/python3 \
+  /home/hank/piper_ws/src/piper_ros/src/piper_moveit/moveit_ctrl/scripts/static_scene_snapshot.py \
+  load --input /home/hank/piper_ws/calibration/bottle_grasp_scan/scan_01/environment.bag \
+  --expected-frame dummy_link --replace
+```
+
+不是任意一张旧 `static_scene.bag` 都能与新的table配对；旧地图可能仍包含瓶子或重复支撑体素。
+恢复后重新检查场景和当前状态。桌子、基座或外参变化时重新采集，而不是复用旧坐标。
+
+保留原脚本直接RealSense SDK检测时，扫描完成后在ROS相机终端Ctrl+C释放设备，
+再启动抓取脚本；MoveIt、扫描门和外参可以继续运行。停止扫描门并不会释放相机。
+改用ROS图像检测则无需停止ROS相机，但扫描门仍保持关闭。
+
+### 3.6 抓取前检查：地图非空且冻结，自动table已加载
+
+在第5节的import中新增 `json`、`hashlib`、`Path`、`Trigger`，以及下面使用的消息import。
+将下列函数放进 `PiperVisionController` 类。
+`self.get_scene`、`self.check_validity`、`self.robot`、`self.tf_buffer` 在第5节初始化。
+
+```python
+# 文件顶部新增：
+import hashlib
+import json
+from pathlib import Path
+from std_srvs.srv import Trigger
+
+# 以下函数加入PiperVisionController类。
+def frozen_scene_signature(self):
+    rospy.wait_for_service("/piper_static_scan_gate/status", timeout=5.0)
+    response = rospy.ServiceProxy("/piper_static_scan_gate/status", Trigger)()
+    if not response.success or json.loads(response.message).get("enabled") is not False:
+        raise RuntimeError("扫描门未确认关闭，拒绝规划/执行")
+    request = GetPlanningSceneRequest()
+    request.components.components = (
+        PlanningSceneComponents.OCTOMAP |
+        PlanningSceneComponents.WORLD_OBJECT_GEOMETRY)
+    scene = self.get_scene(request).scene
+    outer = scene.world.octomap.header.frame_id
+    octomap = scene.world.octomap.octomap
+    inner = octomap.header.frame_id
+    if (not octomap.data or not np.isfinite(octomap.resolution)
+            or octomap.resolution <= 0 or not octomap.id
+            or (outer and inner and outer != inner)
+            or (outer or inner).lstrip("/") != "dummy_link"):
+        raise RuntimeError("环境OctoMap为空/无效/坐标系错误")
+    objects = {obj.id: obj for obj in scene.world.collision_objects}
+    if "table" not in objects:
+        raise RuntimeError("自动table模型未加载")
+    # 同时检查地图与table几何：若被其他节点更改，停止任务。
+    table = objects["table"]
+    from io import BytesIO
+    stream = BytesIO()
+    geometry = copy.deepcopy(table)
+    # 查询/重发的消息序号和时间戳不属于几何变化。
+    geometry.header.seq = 0
+    geometry.header.stamp = rospy.Time(0)
+    geometry.serialize(stream)
+    payload = bytes((v & 255 for v in octomap.data))
+    origin = scene.world.octomap.origin
+    transform = (origin.position.x, origin.position.y, origin.position.z,
+                 origin.orientation.x, origin.orientation.y,
+                 origin.orientation.z, origin.orientation.w)
+    signature = ((outer or inner), octomap.id, octomap.binary, octomap.resolution,
+                 transform, hashlib.sha256(payload).hexdigest(),
+                 hashlib.sha256(stream.getvalue()).hexdigest())
+    return signature, table
+
+def require_scan_scene(self):
+    # 第一次运动之前验证所有必需的误差/提升参数。
+    self.support_edge_margin = float(rospy.get_param("~support_edge_margin"))
+    self.lift_clearance = float(rospy.get_param("~lift_clearance"))
+    if (not np.isfinite([self.support_edge_margin, self.lift_clearance]).all()
+            or self.support_edge_margin < 0 or self.lift_clearance <= 0):
+        raise ValueError("支撑边界余量/提升余量无效")
+    signature, table = self.frozen_scene_signature()
+    model_path = rospy.get_param("~table_model")
+    model = json.loads(Path(model_path).read_text())
+    if (model.get("version") != 1 or model.get("frame_id") != "base_link"
+            or model.get("object_id") != "table"):
+        raise RuntimeError("桌面模型文件无效")
+    lower = np.asarray(model["bounds_min"], dtype=float)
+    upper = np.asarray(model["bounds_max"], dtype=float)
+    normal = np.asarray(model["plane_normal"], dtype=float)
+    offset = float(model["plane_offset"])
+    if (normal.shape != (3,) or not np.isfinite(normal).all()
+            or not np.isfinite(offset) or abs(np.linalg.norm(normal) - 1) > 1e-3
+            or normal[2] < np.cos(np.deg2rad(10))):
+        raise RuntimeError("扫描桌面平面参数无效")
+    if (lower.shape != (3,) or upper.shape != (3,)
+            or not np.isfinite([lower, upper]).all() or np.any(upper <= lower)):
+        raise RuntimeError("桌面模型边界无效")
+    if (len(table.primitives) != 1 or len(table.primitive_poses) != 1
+            or table.primitives[0].type != 1  # SolidPrimitive.BOX
+            or not np.allclose(table.primitives[0].dimensions, upper - lower,
+                               rtol=0, atol=1e-6)):
+        raise RuntimeError("场景table尺寸与模型文件不一致")
+    # 合成对象整体位姿与shape位姿，再转换到base_link核对中心与姿态。
+    def pose_matrix(p):
+        T = tf_trans.quaternion_matrix([
+            p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w])
+        T[:3, 3] = [p.position.x, p.position.y, p.position.z]
+        return T
+    actual = self.pose_from_matrix(pose_matrix(table.pose) @
+                                   pose_matrix(table.primitive_poses[0]))
+    actual.header = table.header
+    if actual.header.frame_id.lstrip("/") != "base_link":
+        actual = self.tf_buffer.transform(actual, "base_link", timeout=rospy.Duration(1.0))
+    pose = pose_matrix(actual.pose)
+    if (not np.allclose(pose[:3, 3], (lower + upper) / 2, rtol=0, atol=1e-4)
+            or not np.allclose(pose[:3, :3], np.eye(3), rtol=0, atol=1e-4)):
+        raise RuntimeError("场景table位姿与扫描文件不一致")
+
+    request = GetPlanningSceneRequest()
+    request.components.components = (
+        PlanningSceneComponents.ROBOT_STATE |
+        PlanningSceneComponents.ROBOT_STATE_ATTACHED_OBJECTS |
+        PlanningSceneComponents.ALLOWED_COLLISION_MATRIX)
+    scene = self.get_scene(request).scene
+    acm = scene.allowed_collision_matrix
+    names = list(acm.entry_names)
+    defaults = dict(zip(acm.default_entry_names, acm.default_entry_values))
+    for obstacle in ("table", "<octomap>"):
+        for link in self.robot.get_link_names():
+            if obstacle in names and link in names:
+                allowed = acm.entry_values[names.index(obstacle)].enabled[names.index(link)]
+            else:
+                allowed = defaults.get(obstacle, False) or defaults.get(link, False)
+            if allowed:
+                raise RuntimeError("障碍与机器人碰撞被放开: %s/%s" % (obstacle, link))
+    validity_request = GetStateValidityRequest()
+    validity_request.robot_state = scene.robot_state
+    validity_request.group_name = ""
+    result = self.check_validity(validity_request)
+    if not result.valid:
+        pairs = [(c.contact_body_1, c.contact_body_2) for c in result.contacts]
+        raise RuntimeError("当前状态无效/碰撞: " + str(pairs))
+    self.table_model = model
+    self.scan_signature = signature
+    rospy.loginfo("非空环境地图已冻结，自动table与扫描文件一致，当前状态有效")
+
+def require_unchanged_scan(self):
+    signature, _ = self.frozen_scene_signature()
+    if signature != self.scan_signature:
+        raise RuntimeError("环境地图/table在任务中改变，停止并重新检查")
+```
+
+第一次动作之前调用：
+
+```python
+def execute_vision_grasp(self):
+    rospy.loginfo(">>> 开始瓶子实物视觉抓取任务")
+    self.require_scan_scene()
+    self.move_joints([1.521, 0.403, -0.521, 0.0, 0.808, 0.0])
+    # 后续按第7～10节执行，禁止保留旧JointState/PosCmd直接控制。
+```
+
+第5节的 `finish_motion()` 也会在执行前调用 `require_unchanged_scan()`，
+禁止规划后地图发生变化仍然执行。签名只保护环境OctoMap和table，
+正常添加/附着瓶子以及阶段性ACM更新不改变它。
+
+这版保守拒绝table或OctoMap与机器人link的放行规则。
+需要真实底座安装接触例外时，只针对确认过的确切pair调整检查和ACM。
+扫描冻结后仍需保证其他节点不改障碍、不发运动命令；签名检查不等于动态实时避障。
+
+### 3.7 验证这次分离是否正确
+
+至少检查：
+
+1. `table`包络来自这次扫描JSON，位置与实物支撑面一致，覆盖预期抓取/放置接触区域。
+2. 环境OctoMap非空、frame为dummy_link；墙、桌边、桌腿等有正确覆盖。
+3. 局部支撑区没有会阻碍带瓶提升的重复桌面体素，目标瓶子没有残留占据体素。
+4. `enabled=false`；放回瓶子后相机图像仍可用于检测，但不再更新地图。
+5. 夹指穿入支撑包络时产生table/link7或table/link8碰撞；
+   夹指穿入其余桌边时产生与OctoMap的碰撞，两种情况都应拒绝执行。
+6. 拟合平面选错、覆盖不足、处理过慢、TF无效时，先修复/重扫，不允许忽略障碍继续。
 
 ## 4. 检查机器人碰撞模型
 
@@ -151,7 +982,11 @@ def add_table(self, x_min, x_max, y_min, y_max, z_bottom, z_top,
 
 ```python
 import copy
+import hashlib
+import json
 import sys
+from pathlib import Path
+from std_srvs.srv import Trigger
 import moveit_commander
 import tf2_ros
 import tf2_geometry_msgs  # 注册 PoseStamped 的 TF 转换。
@@ -274,6 +1109,7 @@ def validate_trajectory(self, traj):
     # 此附加检查检查返回轨迹采样点；点间检查依赖 MoveIt 规划插值分辨率。
 
 def finish_motion(self, traj):
+    self.require_unchanged_scan()  # 第3.6节：仍为本次冻结环境/table。
     self.validate_trajectory(traj)
     display = DisplayTrajectory()
     display.trajectory_start = self.robot.get_current_state()
@@ -283,6 +1119,7 @@ def finish_motion(self, traj):
         # 首段预览后停止任务；不能把未执行终点当作下一段真实起点。
         rospy.sleep(1.0)
         raise PlanningOnlyStop("仅规划，任务在第一段展示后停止")
+    self.require_unchanged_scan()  # 在真正发送轨迹前再次检查。
     if not self.arm.execute(traj, wait=True):
         raise RuntimeError("MoveIt/FollowJointTrajectory 执行失败")
     self.arm.stop()
@@ -346,7 +1183,9 @@ def move_cartesian(self, T):
 直线段受阻时停止或重新选择预抓取方向；不能关掉碰撞检查强行执行。
 3% 是关节速度/加速度缩放比例，不等于旧脚本的 `v=0.02 m/s`。
 
-每次动作前还应确认实机关节反馈新鲜、扫描门关闭、桌面/瓶子模型已同步，且没有其他程序改场景或发运动命令。
+每次动作前还应确认实机关节反馈新鲜、扫描门关闭、自动table/瓶子模型已同步、
+环境OctoMap非空且与任务开始时一致，没有其他程序改场景或发运动命令。
+`require_scan_scene()`必须在第一次动作之前运行，建立签名；不能单独调用运动函数跳过它。
 上述函数假设单个任务控制器独占运动和场景更新。
 
 ## 6. 核对手眼变换和 TCP，不直接反转旧矩阵
@@ -401,9 +1240,31 @@ def wait_object(self, name, known, attached, timeout=5.0):
         rospy.sleep(0.05)
     raise RuntimeError("场景对象未同步: " + name)
 
+def table_surface_z(self, x, y):
+    normal = np.asarray(self.table_model["plane_normal"], dtype=float)
+    return -(normal[0] * x + normal[1] * y +
+             self.table_model["plane_offset"]) / normal[2]
+
+def require_support_footprint(self, center_xyz, radius):
+    lower = np.asarray(self.table_model["bounds_min"])
+    upper = np.asarray(self.table_model["bounds_max"])
+    # 使用第3.6节记录的实际地图分辨率，再加已校验的水平误差余量。
+    extra = self.support_edge_margin  # 第3.6节已在首次运动前读取/校验。
+    if not np.isfinite(extra) or extra < 0:
+        raise ValueError("support_edge_margin无效")
+    resolution = self.scan_signature[3]
+    border = radius + resolution + extra
+    xy = np.asarray(center_xyz[:2], dtype=float)
+    if np.any(xy <= lower[:2] + border) or np.any(xy >= upper[:2] - border):
+        raise RuntimeError("瓶子接触区域靠近局部table边界，重新选择区域/扫描")
+
 def add_bottle(self, center_xyz, height, radius):
-    if height <= 0 or radius <= 0:
+    center_xyz = np.asarray(center_xyz, dtype=float)
+    if center_xyz.shape != (3,) or not np.isfinite(center_xyz).all():
+        raise ValueError("瓶子中心无效")
+    if not np.isfinite([height, radius]).all() or height <= 0 or radius <= 0:
         raise ValueError("瓶子尺寸无效")
+    self.require_support_footprint(center_xyz, radius)
     pose = PoseStamped()
     pose.header.frame_id = "base_link"
     pose.pose.orientation.w = 1.0  # 瓶子直立，圆柱轴沿 base Z。
@@ -411,9 +1272,14 @@ def add_bottle(self, center_xyz, height, radius):
      pose.pose.position.z) = center_xyz
     self.scene.add_cylinder("target_bottle", pose, height=height, radius=radius)
     self.wait_object("target_bottle", known=True, attached=False)
+    self.bottle_center_at_grasp = center_xyz.copy()
+    self.bottle_height = float(height)
 ```
 
-直立瓶子圆柱中心 z = 实际桌面 z + 瓶高/2。
+直立瓶子圆柱中心 z = `table_surface_z(x, y)` + 瓶高/2。
+使用相机拟合的真实支撑平面，不使用膨胀后box顶部当作真实瓶底位置。
+`~support_edge_margin`是需要配置的水平误差余量；仅用于确保支撑接触区域远离包络/体素边界。
+其他瓶子应使用独立ID并保持碰撞检查，不能都使用target_bottle覆盖前一个对象。
 半径可以保守膨胀；底面不要随意向下膨胀，以免制造额外桌面穿透。
 有把手、瓶盖突出部分时使用组合几何，而不是假设单圆柱足够。
 
@@ -507,11 +1373,12 @@ def command_gripper(self, opening_m, effort):
 
 ## 9. 将原任务按阶段替换
 
-先完成上述几何和接口初始化，再改 `execute_vision_grasp()`。
+先完成第3节相机拟合、过滤后环境扫描和冻结检查，再初始化第5节接口，
+改 `execute_vision_grasp()`，第一段运动之前调用 `require_scan_scene()`。
 
 | 原动作 | 新动作 | 碰撞要求 |
 |---|---|---|
-| 发布拍照 JointState | `move_joints([1.521, 0.403, -0.521, 0, 0.808, 0])` | 桌面/固定场景已经加载 |
+| 发布拍照 JointState | `move_joints([1.521, 0.403, -0.521, 0, 0.808, 0])` | 自动table/冻结环境OctoMap已加载 |
 | 检测瓶子 | 停稳后取拍照时 link6 位姿；建立独立圆柱 | 识别点、模型中心、抓取点分别处理 |
 | 到预抓取位 | `move_pose(T_pre_ee)` | OMPL 绕桌边，禁止接触瓶子 |
 | 前探4 cm | 接触权限后 `move_cartesian(T_grasp_ee)` | 全程夹爪与桌面禁止碰撞 |
@@ -543,16 +1410,17 @@ T_lift_ee[2, 3] += lift_distance  # base Z 竖直提升，姿态保持。
 
 根据桌边和瓶子位置，生成多个水平接近方向：面向瓶子的外侧、左右侧等。
 对每个方向先验证最终抓取状态，然后验证短直线段及可达预抓取路径，成功才选择该候选。
-最终夹爪最低点至少高于实测桌面加所选误差余量。
+最终夹爪最低点至少高于相机拟合支撑平面加所选误差余量；实际碰撞检查还使用膨胀后的table包络。
 TCP 高于桌面不能代替整个夹爪 collision 的检查。
 
 如果要求全程保持夹爪水平，需要增加 OrientationConstraint 并验证可行性；
 仅设置水平目标姿态不能保证 OMPL 中途也保持水平。
 夹持转运也应根据瓶子是否允许倾斜选择约束，防止绕行中甩动或滑落。
 
-## 10. 抓住后附着，并处理支撑接触
+## 10. 抓住后附着，处理自动table的支撑接触
 
-夹持确认之后：
+本节使用第3节从点云估计的局部命名 `table`；环境OctoMap继续参与所有动作的碰撞检查。
+夹持确认之后，先核对瓶子模型位置与真实夹持状态，再附着：
 
 ```python
 self.scene.attach_object(
@@ -560,79 +1428,88 @@ self.scene.attach_object(
 self.wait_object("target_bottle", known=False, attached=True)
 ```
 
-附着的是实际瓶子几何，姿态需对应真实抓住的位置。若接近时瓶子滑动，先更新模型。
-不能在尚未抓住时 attach：否则模型会提前随机器人移动。
-
-瓶子此时仍在桌上。桌面膨胀、几何相切和数值误差可能让附着瓶底与桌面被判为碰撞。
-可只在第一段竖直抬起中允许该瓶子与支撑桌面接触：
+不能尚未抓住就attach，也不能先删除环境OctoMap。
+瓶子此时仍与桌面接触，自动table的保守膨胀可能让附着瓶底被判为碰撞。
+只有姿态固定、沿base Z向上的第一段提升，可以临时放开 `target_bottle/table`：
 
 ```python
-# 保存当前阶段的 ACM，提升后只还原本阶段权限。
 acm_before_lift = self.get_acm()
 self.set_contact_pairs([("target_bottle", "table")], True)
+start_ee = self.current_ee_matrix()
 self.move_cartesian(T_lift_ee)
-# 此时必须确认瓶底已离开膨胀桌面（并达到误差余量）。
+# 执行成功后，基于测得的末端提升量和已确认夹持估算瓶底高度。
+# 实物滑动时此估算不成立，需要夹持/视觉再次确认。
+actual_lift = self.current_ee_matrix()[2, 3] - start_ee[2, 3]
+bottom_z = self.bottle_center_at_grasp[2] - self.bottle_height / 2 + actual_lift
+clearance = self.lift_clearance  # 第3.6节已在首次运动前读取/校验。
+if not np.isfinite(clearance) or clearance <= 0:
+    raise ValueError("lift_clearance必须是已验证的正余量")
+if bottom_z <= self.table_model["bounds_max"][2] + clearance:
+    raise RuntimeError("瓶底尚未确认离开膨胀table，停止后续转运")
 self.apply_acm(acm_before_lift)
-# 之后立即用 /check_state_validity 验证当前全机器人状态，再继续转运。
+# 撤回例外后检查全机器人当前状态，包括附着瓶子。
+req = GetPlanningSceneRequest()
+req.components.components = (
+    PlanningSceneComponents.ROBOT_STATE |
+    PlanningSceneComponents.ROBOT_STATE_ATTACHED_OBJECTS)
+state = self.get_scene(req).scene.robot_state
+request = GetStateValidityRequest(robot_state=state, group_name="")
+if not self.check_validity(request).valid:
+    raise RuntimeError("提升后状态仍无效，停止后续转运")
 ```
 
-只能在姿态固定、沿 base Z 向上的提起段放开这一个 pair；
-不能借这个例外水平穿过桌板，也不能放开任意机器人 link 与 table 的碰撞。
-如果支撑桌面仍以 OctoMap 体素表示，还可能有瓶底对 `<octomap>` 的接触：
-优先把抓取区域支撑几何用实测 box 独立表示，并确保瓶子之外的体素准确，
-或采用专门支持支撑接触的抓放实现；不要因此放开整个瓶子与所有 OctoMap 障碍。
-对本方案，最易调试的初始版本是该桌子使用 box、其他固定障碍使用 box/无目标物的冻结地图。
+第3.6节已经在第一次运动前读取并验证`~lift_clearance`，不能推迟到提升之后才配置。
+上面的片段说明提升后的几何检查；同时保持夹持确认，不能把成功返回值当作实物一定没滑动。
 
-放置时先规划到瓶底位于桌面以上的预放置位。
-如果最终下降到支撑面，需要同样只临时处理 bottle/table 接触。
-松开后 `remove_attached_object("link6", name="target_bottle")`，
-查询状态并把世界对象的位置校正为实测放置位置。
-夹指退出前保留 bottle/finger 例外；退出成功后禁止接触并恢复任务前 ACM。
-不能先删除场景中所有瓶子再撤退。
+临时例外只影响目标瓶子与局部table，不放开夹指/手腕/手臂与table，
+也不放开瓶子或机器人与整个 `<octomap>`。
+如果起始提升仍被瓶子/OctoMap碰撞阻挡，优先检查：旧瓶子体素、重复桌面、
+局部包络边界、地图噪声或未分离的支撑结构；修复/重扫后再规划。
+不要通过关闭碰撞检查、直接PosCmd提升或给整个OctoMap设置接触权限绕过。
 
-如果中途失败：停止运动，保留与真实夹持状态相符的 attached/world 模型，记录当前权限，
-不要在异常清理中自动松爪、detach、回零或删除真实障碍。
+放置前用同一支撑区域或另一次扫描产生的独立命名支撑对象，
+规划到瓶底在支撑面上方的预放置位，短距离下降时仅处理对应支撑接触。
+若放置目标在另一个桌子/盒子上，应另建可识别的支撑对象并检查覆盖，
+不能把原table的权限套用到其他OctoMap障碍。
+松开后解除附着，将瓶子作为正确世界位姿的碰撞对象保留；夹指退出后取消接触权限。
+
+失败时停止后续动作，保留与真实夹持状态一致的attached/world模型，记录当前阶段的ACM。
+不自动松爪、detach、回零、删除障碍，也不在失败清理中假定瓶底已离开table。
 
 ## 11. 启动顺序与完整验证
 
 以下命令是修改之后由操作者运行的步骤，本次没有运行。
 
-### A. 场景准备阶段
+### A. 按终端完成启动和环境扫描
 
-第一版若全部使用几何对象，加载所有测量好的障碍后即可验证，
-无需启动相机点云或扫描门；如果旧 OctoMap 仍在，明确停止更新并在几何替代完整后清空。
-下面是组合点云地图的扩展流程，抓取区桌面点的分割和 box 替代须先完成。
+第3.3～3.4节已经给出可从头执行的全部命令，此处列出对应关系，避免重复启动：
 
-启动实机 MoveIt 前确认机械臂初始状态、环境、急停和模型。
-这个 launch 默认会尝试使能机械臂；它不是纯离线查看模型。
+| 终端 | 启动命令/工作 | 详细位置 |
+|---|---|---|
+| 1 | `roslaunch piper_with_gripper_moveit piper_real.launch can_port:=can0 auto_enable:=false` | 第3.3.2节；先确认CAN |
+| 2 | `roslaunch moveit_ctrl eye_in_hand_camera.launch enable_pointcloud:=true` | 第3.3.3节 |
+| 3 | `roslaunch /home/hank/piper_ws/calibration/eye_in_hand_d435i/session_02/camera_extrinsics.launch` | 第3.3.4节 |
+| 4 | TF/点云检查、参数加载、collect/load、扫描控制与保存 | 第3.3.5、第3.4、第3.5节 |
+| 5 | `camera_table_scene.py filter` | 第3.4节；需要先有JSON |
+| 6 | `roslaunch moveit_ctrl static_scene_mapping.launch input_cloud:=/piper/table_scan/environment_points` | 第3.4节 |
 
-```bash
-roslaunch piper_with_gripper_moveit piper_real.launch can_port:=can0 auto_enable:=true
-```
+启动用auto_enable=false不自动请求电机使能；后续确需运动时，按已验证实机流程处理使能，
+确认真实反馈、碰撞模型和规划轨迹后再执行，不因缺TF而改用fake状态。
 
-其他终端分别启动相机、已验证的外参和扫描门：
+第一次建图的完整顺序：
 
-```bash
-roslaunch moveit_ctrl eye_in_hand_camera.launch enable_pointcloud:=true
-roslaunch /home/hank/piper_ws/calibration/eye_in_hand_d435i/session_02/camera_extrinsics.launch
-roslaunch moveit_ctrl static_scene_mapping.launch
-```
+1. 移走待抓瓶子，准备安全停稳的相机视角；每个终端加载同一ROS环境。
+2. 确认CAN，启动终端1、2、3；检查真实joint_states和完整相机TF。
+3. 终端4加载参数、collect生成JSON；本次scan_01已成功可以跳过重复采集。
+4. 终端4加载自动table，在RViz检查后启动终端5和6。
+5. 终端4在重新扫描阶段stop/clear/start；覆盖相关环境后stop，等待地图稳定。
+6. 检查非空OctoMap、自动table、无目标瓶子体素和局部重复支撑体素。
+7. 放回瓶子，不再start；把JSON与环境快照成对保存。
+8. 直接SDK检测时停止终端2释放相机；ROS图像检测则保留相机但关闭扫描门。
 
-移走待抓瓶子并确认已知安全视角后，依次 clear/start、多视角扫描、stop：
-
-```bash
-rosrun moveit_ctrl static_scan_control.py stop
-rosrun moveit_ctrl static_scan_control.py clear
-rosrun moveit_ctrl static_scan_control.py start
-# 在已确认安全的多个视角停稳采集；这些命令不会自动扫描移动机械臂。
-rosrun moveit_ctrl static_scan_control.py stop
-rosrun moveit_ctrl static_scan_control.py status
-```
-
-RViz 中检查桌面、桌边和固定障碍，确认没有待抓瓶子体素；
-检查抓取区支撑面已由 box 覆盖，并没有会阻碍带瓶提升的重复桌面体素。
-status 应为 enabled=false；将瓶子放回后不再 start。
-保留直接 SDK 检测时，接着停止 ROS 相机 launch，确认设备释放。
+后续MoveIt重启时，仅在场景/安装未变的情况下恢复第3.5节的同一对文件。
+仍需恢复table和环境地图、检查TF与关节反馈，不能只载入bag或混用不同批次JSON。
+恢复后无需重新clear/start破坏已恢复场景，也不必再次collect。
 
 ### B. 接口和模型检查
 
@@ -641,7 +1518,7 @@ rostopic info /joint_states
 rostopic echo -n 1 /joint_states
 rosnode info /piper_ctrl_single_node
 rosservice list
-rosparam get /move_group/arm/longest_valid_segment_fraction
+rosparam get /move_group/planning_pipelines/ompl/arm/longest_valid_segment_fraction
 ```
 
 `/joint_states` 的真实反馈应由驱动发布，不应出现抓取脚本或旧 Pinocchio 控制节点发布伪反馈。
@@ -650,15 +1527,39 @@ rosparam get /move_group/arm/longest_valid_segment_fraction
 
 验证 `/arm_controllers/follow_joint_trajectory`、`/gripper_srv`、
 `/get_planning_scene`、`/apply_planning_scene`、`/check_state_validity` 都存在。
-URDF 的 link7/link8、TCP、相机外参和真实实物必须一致。
+URDF的link7/link8、TCP、相机外参和真实实物必须一致。
+再检查当前地图和扫描门，命令如下：
+
+```bash
+/usr/bin/python3 \
+  /home/hank/piper_ws/src/piper_ros/src/piper_moveit/moveit_ctrl/scripts/static_scene_snapshot.py inspect
+rosrun moveit_ctrl static_scan_control.py status
+```
+
+前者应报告非空且frame=dummy_link，后者enabled=false。
+第3.6节检查还会对照JSON核对table，记录环境签名。
 
 ### C. 先预览，再分段执行
 
+先在终端输入已经校验过的两个余量数值（单位m），再运行预览：
+
 ```bash
-/usr/bin/python3 /home/hank/piper_ws/src/piper_ros/src/bottle_grab/grab2016_5_28_3_moveit.py _execute:=false
+read -r -p "水平定位/模型误差余量(m): " PIPER_SUPPORT_EDGE_MARGIN
+read -r -p "瓶底离开包络后的提升余量(m): " PIPER_LIFT_CLEARANCE
+
+/usr/bin/python3 \
+  /home/hank/piper_ws/src/piper_ros/src/bottle_grab/grab2016_5_28_3_moveit.py \
+  _execute:=false \
+  _table_model:=/home/hank/piper_ws/calibration/bottle_grasp_scan/scan_01/table_model.json \
+  "_support_edge_margin:=$PIPER_SUPPORT_EDGE_MARGIN" \
+  "_lift_clearance:=$PIPER_LIFT_CLEARANCE"
 ```
 
-按第5节代码，此命令只展示第一段规划后停止。
+按第5节代码，此命令先检查自动table和冻结的非空环境地图，再展示第一段规划后停止。
+在开始任务前配置并校验 `~support_edge_margin`、`~lift_clearance`（米）；
+它们没有通用实机默认值，应由已经确认的定位误差与所需提升余量确定。
+上面命令将输入值传为节点私有参数，也可以在launch中设置同名param。
+程序会在第一段运动之前验证数值；不可填未经校验的通用示例值。
 应在 `run()` 中捕获 `PlanningOnlyStop` 并记录日志，在 finally 中保持原相机释放逻辑并 shutdown MoveIt。
 初始化相机失败时也要处理 pipeline 未创建的情况。
 
@@ -668,14 +1569,17 @@ URDF 的 link7/link8、TCP、相机外参和真实实物必须一致。
 
 至少验证以下结果：
 
-1. 故意给出一个夹指穿桌的目标，`/check_state_validity` 报出 table/link7 或 table/link8，规划拒绝。
+1. 故意给出夹指穿入局部支撑table的目标，检查报出table/link7或table/link8并拒绝；
+   穿入其余环境桌边时也要报出与OctoMap的碰撞并拒绝。
 2. 合法目标有可执行轨迹；绕行时手腕、夹爪、相机都在模型内，桌边没有被忽略。
 3. 靠近瓶子时只有 target_bottle/link7、target_bottle/link8 允许接触。
 4. 最终抓取状态和短直线段完整有效；fraction 不完整时任务终止，不闭爪。
 5. 真正抓住后，场景中可见 AttachedCollisionObject，抬起/返回轨迹检查包含瓶子。
-6. 提升结束后撤回 bottle/table 支撑例外，并验证完整当前状态。
+6. 提升后确认瓶底离开自动table包络，撤回bottle/table支撑例外，再验证全机器人状态。
+   环境OctoMap在接近、提升、转运各阶段均继续参与碰撞检查。
 7. MoveIt/action、夹爪确认或 TF/反馈任一失败，后续状态不再执行。
-8. 放置、撤退、返回也走 MoveIt，场景中的新瓶子位置同步。
+8. 放置、撤退、返回也走MoveIt，场景中的新瓶子位置同步。
+9. 任务中重新start扫描门或改变OctoMap/table时，后续运动被签名检查拒绝。
 
 逐段确认后才用 `_execute:=true` 进行低速实机验证；它会发运动命令和夹爪命令。
 新脚本中的等待应依赖到位/抓取反馈，而不是沿用原固定 sleep 时间。
@@ -692,5 +1596,12 @@ URDF 的 link7/link8、TCP、相机外参和真实实物必须一致。
   `compute_cartesian_path(waypoints, eef_step, avoid_collisions=True, path_constraints=None)`；
   `retime_trajectory()` 的速度和加速度参数。
 - 同目录 `planning_scene_interface.py`：同步场景接口、attach_object、add_cylinder。
+- `moveit_ctrl/launch/static_scene_mapping.launch`：input_cloud可显式改为过滤点云话题。
+- `static_scan_gate.py`：保留点云frame/时间戳，关闭时停止转发。
+- `static_scene_snapshot.py`：只保存/恢复OctoMap，自动table需用本节JSON另行恢复。
+- 本机 `sensor_msgs.point_cloud2`、`tf2_ros`：读取/创建PointCloud2和按历史时间查TF。
 
-接口核对来自当前本机文件。没有做目标桌面测量、真实 TCP/夹指包络标定、完整脚本改造或实机路径验证。
+接口核对来自当前本机文件。2026-10-14用户已完成真实点云桌面采集，
+本机已生成scan_01/table_model.json；这项结果仅确认采集/拟合完成。
+桌面识别覆盖、过滤后环境地图、真实TCP/夹指包络、完整抓取流程和实机路径仍需分别验证。
+扫描地图是固定场景规划依据，冻结后不提供动态实时避障。

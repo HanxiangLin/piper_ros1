@@ -1,0 +1,1080 @@
+# 瓶子抓取接入 MoveIt：桌面避障与目标接触
+
+核对日期：2026-10-13。
+
+分析的原脚本：`/home/hank/competition_ws/piper_ws/src/piper_ros/src/xiaosai/grab2016_5_28_3.py`。
+使用的 MoveIt 工作空间：`/home/hank/piper_ws`，ROS1 Noetic。
+
+本文提供修改步骤和可复制的核心函数，没有改动原比赛脚本，也没有执行实机运动。
+代码中的桌面、瓶子、工具变换、模型路径和夹持判断参数需要实测；这些片段不是已经验证过的实机成品。
+
+## 1. 要实现的行为
+
+目标检测 → 在 base_link 下生成抓取目标 → MoveIt 对桌面和固定障碍规划 →
+到预抓取位 → 允许两根夹指接触指定瓶子 → 碰撞检查下短距离直线接近 →
+闭合并确认夹持 → 把瓶子附着到 link6 → 竖直抬起 → 携带瓶子规划返回/放置。
+
+桌面与机器人各 link 始终参与碰撞检查。只有目标瓶子与实际接触它的夹指允许接触。
+
+当前脚本的 `move_to_target_smooth()` 只是直线位置插值和姿态 Slerp，发布 `/pin_pos_cmd`；
+它没有请求 MoveIt。向 `/joint_states` 发布初始姿态的代码也绕过规划。
+因此，单独启动 MoveIt 或仅增加桌面模型都不会改变这些旧动作。
+
+还有一个物理限制：最终抓取姿态如果让夹指穿入桌面，规划器只能拒绝。
+需要提高真实抓取点、改变水平接近方向、改变夹爪姿态，或者先调整瓶子的摆放。
+
+## 2. 选择一个 ROS 工作空间和一种相机使用方式
+
+比赛工作空间中未找到当前实机避障入口 `piper_real.launch`。
+推荐复制抓取脚本到已有避障工作空间，避免复制整套旧驱动覆盖新驱动。
+
+```bash
+mkdir -p /home/hank/piper_ws/src/piper_ros/src/bottle_grab
+cp -n /home/hank/competition_ws/piper_ws/src/piper_ros/src/xiaosai/grab2016_5_28_3.py \
+  /home/hank/piper_ws/src/piper_ros/src/bottle_grab/grab2016_5_28_3_moveit.py
+```
+
+如果该目标文件已经存在，`cp -n` 不覆盖；先查看它，再决定使用另一文件名。
+后续修改的是新文件。原文件保留为备份。
+每个终端使用同一个 ROS 环境；当前显示 `(base)` 时先退出 Conda：
+
+```bash
+conda deactivate
+source /opt/ros/noetic/setup.bash
+source /home/hank/piper_ws/devel/setup.bash
+rospack find piper_with_gripper_moveit
+rospack find piper
+rospack find moveit_ctrl
+```
+
+输出都应指向 `/home/hank/piper_ws/src/...`。不要在这些终端再次 source 比赛工作空间。
+
+原脚本通过 `rs.pipeline().start()` 直接占用相机，有两种可行方式：
+
+- 保留直接 SDK 检测：先用 ROS 相机完成静态扫描，stop 冻结地图，然后在相机 launch 所在终端 Ctrl+C
+  停止 ROS 相机、确认设备释放，再运行抓取脚本。保留 MoveIt、实机驱动和外参发布节点。
+  仅关闭扫描门不会释放相机。脚本使用已验证的 link6 到 color optical frame 外参。
+- 后续改成 ROS 图像输入：彩色图、对齐深度图和 CameraInfo 用时间同步方式接收，使用图像时间戳的 TF。
+  删除直接 SDK 开流代码，ROS 相机可以继续运行，但抓取期间扫描门仍应关闭。
+
+最少改动可先使用第一种方式。不要同时让两个程序打开同一相机。
+原脚本 `MODEL_PATH` 指向 `/home/user/...`；本工作空间存在
+`/home/hank/piper_ws/src/piper_ros/src/bottle_grab/bottle.pt`，但要确认它的类别和实际模型确实匹配。
+必须用能够同时导入 MoveIt 和当前 YOLO/RealSense 依赖的 Python 环境。
+
+## 3. 桌面建模，避免把目标瓶子扫描成障碍
+
+这一节先完成一个具体结果：**在 MoveIt 场景中放入名为 `table` 的桌板碰撞模型，
+让抓取脚本在第一次规划前确认它存在。目标瓶子以后单独以 `target_bottle` 添加，
+本版不把瓶子或桌面写入 OctoMap。**
+
+按下面顺序操作：测量 → 写 YAML → 写场景加载脚本 → 加载并检查 → 在抓取脚本中加入检查。
+下面是需要你根据文档创建的文件；本节代码不会自动生成它们：
+
+| 文件 | 放入的内容 | 谁使用 |
+|---|---|---|
+| `piper_moveit/moveit_ctrl/config/bottle_table_scene.yaml` | 桌面与固定障碍的实测位置、尺寸 | 场景加载脚本 |
+| `piper_moveit/moveit_ctrl/scripts/load_bottle_table_scene.py` | 把 YAML 中的几何对象提交给 MoveIt | 手动运行一次 |
+| `bottle_grab/grab2016_5_28_3_moveit.py` | 第3.7节的场景检查函数和调用 | 抓取任务 |
+
+以上路径都相对于 `/home/hank/piper_ws/src/piper_ros/src/`。
+先建配置目录；`scripts` 目录已经存在也可运行：
+
+```bash
+mkdir -p /home/hank/piper_ws/src/piper_ros/src/piper_moveit/moveit_ctrl/config
+mkdir -p /home/hank/piper_ws/src/piper_ros/src/piper_moveit/moveit_ctrl/scripts
+```
+
+### 3.1 用哪个坐标系测量，具体需要填哪些数
+
+统一在 `base_link` 坐标系下表示桌面位置，长度单位为 **m**。
+在 RViz 中把 `Fixed Frame` 设为 `base_link`，添加 TF 显示并查看基座坐标轴，
+先确认原点及 X/Y/Z 的真实方向，不能仅凭机械臂“前方”猜测 X。
+机器人不需要为这项测量运动。
+
+本节假设桌面水平，即桌板法向平行于 base Z。若桌面明显倾斜，需要完整三维旋转，
+不要使用本节仅绕 Z 旋转的模型。
+
+| YAML 参数 | 实际测量方法/含义 |
+|---|---|
+| `center_xy: [x, y]` | 桌板几何中心相对基座原点的水平位置；沿基座 X/Y 方向测量，注意正负号 |
+| `size_xy: [length, width]` | 桌板两条边的长度；不是相机图像里的宽高 |
+| `yaw_deg` | 长度边相对 base +X 的角度，绕 base +Z 按右手规则为正；平行时为0 |
+| `z_top` | 桌面上表面相对基座原点的 Z，位于原点下方时为负 |
+| `z_bottom` | 桌板下表面的 Z；`z_bottom = z_top - 桌板厚度` |
+| `margin_xy` | 水平方向每侧增加的误差余量 |
+| `margin_z` | 竖直方向上下各增加的误差余量 |
+
+例如，如果**测量结果**是基座坐标原点比桌面高0.025 m、桌板厚0.030 m，
+则 `z_top=-0.025`、`z_bottom=-0.055`。这只是解释符号，不能直接作为你的桌面参数。
+不要填写桌面离地高度，除非 base_link 原点恰好就在地面。
+
+桌板模型的计算公式是：
+
+```text
+box中心 = [center_x, center_y, (z_top + z_bottom)/2]
+box尺寸 = [length + 2×margin_xy,
+           width  + 2×margin_xy,
+           z_top - z_bottom + 2×margin_z]
+box姿态 = 绕base Z旋转yaw_deg
+```
+
+因此模型顶部是 `z_top + margin_z`。后面选择抓取高度、判断瓶底离桌时，
+也要考虑这个膨胀后的顶部；不能只比较真实桌面 `z_top`。
+误差余量要覆盖实测、外参、机器人模型和跟踪误差，本节不代填一个未经验证的数值。
+
+如果机械臂固定在这张桌上，先确认模型不会错误地穿入底座安装体积。
+需要安装孔/缺口时，把桌板分成多个 box，并继续使用同一个对象 ID `table`；
+本节给出的单box版本适用于不需要该缺口的场景。不要直接允许整个机械臂与桌子碰撞。
+
+### 3.2 新建 YAML：这里填写实测值
+
+用编辑器新建：
+
+```text
+/home/hank/piper_ws/src/piper_ros/src/piper_moveit/moveit_ctrl/config/bottle_table_scene.yaml
+```
+
+放入以下内容。`MEASURE` 是故意保留的占位字符串，必须替换为数字；
+脚本发现占位值会拒绝加载，避免把示例尺寸误用到实机。
+
+```yaml
+frame_id: base_link
+
+table:
+  center_xy: [MEASURE, MEASURE]
+  size_xy: [MEASURE, MEASURE]
+  yaw_deg: MEASURE
+  z_top: MEASURE
+  z_bottom: MEASURE
+  margin_xy: MEASURE
+  margin_z: MEASURE
+
+# 没有其他固定障碍时可保留空列表。
+# 有桌腿、桌裙、横梁、箱子、墙等时，每个都应按下面的格式填写。
+fixed_boxes: []
+
+# fixed_boxes:
+#   - name: table_front_apron
+#     center: [MEASURE, MEASURE, MEASURE]
+#     size: [MEASURE, MEASURE, MEASURE]
+#     yaw_deg: MEASURE
+```
+
+`fixed_boxes` 的 `center` 是几何中心，`size` 是长/宽/高；都用米。
+这里的额外 box 尺寸直接填写**包含所选余量的尺寸**，脚本不再自动膨胀它们。
+不同对象用不同名称，不要使用 `target_bottle`，瓶子在第7节单独创建。
+
+例如有一块桌前挡板，就把 `fixed_boxes: []` 替换成上面注释的列表形式，
+去掉注释并填入挡板实测值。如果夹爪可能下探到桌边下方，桌裙/横梁尤其不能省略。
+
+### 3.3 新建完整场景加载脚本
+
+用编辑器新建：
+
+```text
+/home/hank/piper_ws/src/piper_ros/src/piper_moveit/moveit_ctrl/scripts/load_bottle_table_scene.py
+```
+
+把下面**完整代码**放进去。本脚本只调用 Planning Scene 服务添加碰撞对象，
+不会向机械臂/夹爪发送运动命令，也不会自动清地图或修改允许碰撞矩阵。
+
+```python
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+import math
+import sys
+import time
+
+import rospy
+from geometry_msgs.msg import Pose
+from moveit_msgs.msg import CollisionObject, PlanningScene, PlanningSceneComponents
+from moveit_msgs.srv import (
+    ApplyPlanningScene, GetPlanningScene, GetPlanningSceneRequest,
+)
+from shape_msgs.msg import SolidPrimitive
+
+
+def number(value, label):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("%s 必须填写实测数字，当前为 %r" % (label, value))
+    value = float(value)
+    if not math.isfinite(value):
+        raise ValueError(label + " 必须是有限数值")
+    return value
+
+
+def vector(value, count, label):
+    if not isinstance(value, list) or len(value) != count:
+        raise ValueError("%s 必须包含%d个数字" % (label, count))
+    return [number(v, "%s[%d]" % (label, i)) for i, v in enumerate(value)]
+
+
+def make_box(name, center, size, yaw_deg):
+    if any(length <= 0 for length in size):
+        raise ValueError(name + " 的三个尺寸必须大于0")
+    obj = CollisionObject()
+    obj.header.frame_id = "base_link"
+    obj.id = name
+    obj.operation = CollisionObject.ADD
+    # 本机 CollisionObject 有整体pose，形状位姿相对于这个pose。
+    obj.pose.orientation.w = 1.0
+    primitive = SolidPrimitive()
+    primitive.type = SolidPrimitive.BOX
+    primitive.dimensions = size  # [X方向尺寸, Y方向尺寸, Z方向尺寸]
+    pose = Pose()
+    pose.position.x, pose.position.y, pose.position.z = center
+    half_angle = math.radians(yaw_deg) / 2.0
+    pose.orientation.z = math.sin(half_angle)
+    pose.orientation.w = math.cos(half_angle)
+    obj.primitives = [primitive]
+    obj.primitive_poses = [pose]
+    return obj
+
+
+def build_objects(config):
+    if not isinstance(config, dict) or config.get("frame_id") != "base_link":
+        raise ValueError("配置必须是字典，frame_id必须为base_link")
+    table = config["table"]
+    xy = vector(table["center_xy"], 2, "table.center_xy")
+    size_xy = vector(table["size_xy"], 2, "table.size_xy")
+    top = number(table["z_top"], "table.z_top")
+    bottom = number(table["z_bottom"], "table.z_bottom")
+    margin_xy = number(table["margin_xy"], "table.margin_xy")
+    margin_z = number(table["margin_z"], "table.margin_z")
+    yaw = number(table["yaw_deg"], "table.yaw_deg")
+    if top <= bottom or min(size_xy) <= 0 or min(margin_xy, margin_z) < 0:
+        raise ValueError("桌面上下高度、边长或余量无效")
+    objects = [make_box(
+        "table", [xy[0], xy[1], (top + bottom) / 2.0],
+        [size_xy[0] + 2 * margin_xy, size_xy[1] + 2 * margin_xy,
+         top - bottom + 2 * margin_z], yaw)]
+    names = {"table"}
+    fixed_boxes = config.get("fixed_boxes", [])
+    if not isinstance(fixed_boxes, list):
+        raise ValueError("fixed_boxes必须是列表")
+    for item in fixed_boxes:
+        name = item["name"]
+        if (not isinstance(name, str) or not name.strip()
+                or name in names or name == "target_bottle"):
+            raise ValueError("固定障碍名称为空、重复或使用了瓶子名称")
+        objects.append(make_box(
+            name, vector(item["center"], 3, name + ".center"),
+            vector(item["size"], 3, name + ".size"),
+            number(item["yaw_deg"], name + ".yaw_deg")))
+        names.add(name)
+    return objects
+
+
+def main():
+    rospy.init_node("load_bottle_table_scene")
+    # rosparam load命令将YAML装入这个全局命名空间。
+    config = rospy.get_param("/bottle_scene")
+    objects = build_objects(config)  # 全部参数通过检查后才提交。
+    for service in ("/apply_planning_scene", "/get_planning_scene"):
+        rospy.wait_for_service(service, timeout=10.0)
+    apply_scene = rospy.ServiceProxy("/apply_planning_scene", ApplyPlanningScene)
+    get_scene = rospy.ServiceProxy("/get_planning_scene", GetPlanningScene)
+    diff = PlanningScene()
+    diff.is_diff = True
+    diff.robot_state.is_diff = True
+    diff.world.collision_objects = objects
+    if not apply_scene(diff).success:
+        raise RuntimeError("MoveIt拒绝场景更新")
+
+    request = GetPlanningSceneRequest()
+    request.components.components = (
+        PlanningSceneComponents.WORLD_OBJECT_GEOMETRY |
+        PlanningSceneComponents.OCTOMAP)
+    deadline = time.monotonic() + 5.0
+    while not rospy.is_shutdown() and time.monotonic() < deadline:
+        response = get_scene(request).scene
+        actual = {obj.id: obj for obj in response.world.collision_objects}
+        if all(obj.id in actual for obj in objects):
+            for expected in objects:
+                stored = actual[expected.id]
+                if len(stored.primitives) != 1:
+                    raise RuntimeError(expected.id + " 的场景几何不是预期单box")
+                if stored.primitives[0].type != SolidPrimitive.BOX:
+                    raise RuntimeError(expected.id + " 的场景几何类型错误")
+                dims = stored.primitives[0].dimensions
+                wanted = expected.primitives[0].dimensions
+                if len(dims) != 3 or any(abs(a - b) > 1e-6
+                                         for a, b in zip(dims, wanted)):
+                    raise RuntimeError(expected.id + " 的场景尺寸与配置不符")
+                rospy.loginfo("已加载 %s，尺寸(m)=%s，输入中心(base_link)=%s",
+                              expected.id, list(dims),
+                              expected.primitive_poses[0].position)
+            if response.world.octomap.octomap.data:
+                rospy.logwarn("旧OctoMap仍非空：模型已加载，按第3.5节处理后再抓取")
+            rospy.loginfo("加载完成；在RViz核对位置/姿态。没有发送运动命令。")
+            return 0
+        rospy.sleep(0.05)
+    raise RuntimeError("场景同步超时，禁止开始抓取")
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (KeyError, TypeError, ValueError, RuntimeError, rospy.ROSException) as error:
+        rospy.logerr("桌面模型加载失败: %s", error)
+        sys.exit(1)
+```
+
+`CollisionObject.ADD` 使用同名ID会更新这个对象，所以桌面测量修正后可以重跑。
+本脚本不会删除其他对象；从 YAML 删除一个旧障碍条目也不会自动把它从场景移除。
+如果确需删除，先确认真实障碍已消失，再针对那个确切ID调用移除，不能清空整个场景。
+
+### 3.4 运行代码，把桌面提交给现有 MoveIt
+
+先确保 `/move_group` 已运行，使用第11节的实机启动方式或独立离线测试环境。
+**不要为加载桌面再启动一套 CAN 驱动。**
+
+在一个新终端运行：
+
+```bash
+# 若当前处于Conda base，先执行conda deactivate。
+source /opt/ros/noetic/setup.bash
+source /home/hank/piper_ws/devel/setup.bash
+
+rosparam load \
+  /home/hank/piper_ws/src/piper_ros/src/piper_moveit/moveit_ctrl/config/bottle_table_scene.yaml \
+  /bottle_scene
+
+rosparam get /bottle_scene/table
+
+/usr/bin/python3 \
+  /home/hank/piper_ws/src/piper_ros/src/piper_moveit/moveit_ctrl/scripts/load_bottle_table_scene.py
+```
+
+这里直接用绝对路径执行 Python，因此无需为这个脚本修改 `CMakeLists.txt`、
+无需 `chmod +x`，也无需重新编译工作空间。
+
+预期输出包含：`已加载 table`、尺寸和中心、`加载完成`。
+如果提示某个字段必须是实测数字，回到 YAML 填完该字段，重新执行 `rosparam load` 和 Python 脚本。
+只有修改磁盘 YAML、没有重新 `rosparam load`，程序仍会读取旧参数。
+
+脚本成功退出后模型保留在当前 `move_group` 的内存场景里。
+重启 `move_group` 后要重新运行加载脚本；仅在参数服务器保留 YAML 不会自动重建模型。
+
+### 3.5 具体如何避免瓶子进 OctoMap
+
+本节的初始实现使用**完整的几何障碍场景**，不进行点云建图。
+相机仍可以供 YOLO 检测瓶子，但不能把它的点云送入 MoveIt 的地图更新器。
+
+本工作空间 `sensors_3d.yaml` 的输入是 `/piper/static_scan/points`，
+并非原始相机点云。`static_scan_gate` 关闭时不会向该话题转发新点云。
+
+按你当前状态选择操作：
+
+- **刚启动 MoveIt、没有载入地图，也没有开启扫描门：**直接加载上述几何模型即可，
+  不需要启动相机点云或扫描门；第3.7节仍会检查地图为空。
+- **扫描门已经启动：**先执行下面的 `stop/status`，确认 `enabled=false`。
+- **曾扫描或载入过 `static_scene.bag`：**关闭扫描不会删除已有瓶子体素。
+  先加载所有几何障碍，在 RViz 逐一确认原地图内相关桌面、墙、桌腿、横梁、箱子都有替代，
+  然后才清空旧 OctoMap。清空后不要重新载入旧 bag，也不要重新 start。
+
+扫描门已经运行时：
+
+```bash
+rosrun moveit_ctrl static_scan_control.py stop
+rosrun moveit_ctrl static_scan_control.py status
+```
+
+确认几何替代完整之后，清空旧 OctoMap：
+
+```bash
+rosservice call /clear_octomap "{}"
+```
+
+`/clear_octomap` 不会让机械臂运动，但会删除整张占据地图；
+本节通过 `/apply_planning_scene` 加入的命名几何对象继续保留。
+如果还有其他节点直接发布 `/piper/static_scan/points`，也应停止该发布源，
+否则地图会重新生成。第3.7节检查只在任务开始时执行，执行期间仍须保持地图输入停止。
+
+**现在的结果应是：桌子由 `table` 表示，其他固定障碍由命名box表示，OctoMap为空。**
+YOLO 之后检测到的瓶子在第7节用 `add_bottle()` 创建，具有独立ID `target_bottle`。
+这样第7节只放开 bottle/finger 接触，第10节只临时处理 bottle/table 支撑接触。
+
+先完成这个版本。以后如果要恢复点云地图，需要另外实现目标物及抓取区支撑面的分割，
+不能直接沿用这套“要求OctoMap为空”的检查函数。尤其不能通过
+`remove_world_object("target_bottle")` 清除瓶子的旧体素，二者不是同一个对象。
+
+### 3.6 在 RViz 和服务中检查加载结果
+
+RViz 设为：
+
+```text
+Global Options → Fixed Frame = base_link
+MotionPlanning → Scene Geometry → Show Scene Geometry = true
+```
+
+核对 `table` 的上表面、四条边和厚度与实物一致，确认旋转方向正确。
+若显示位置错误，修正 YAML 后重新加载，不要通过增大允许碰撞范围解决。
+可以直接查询 MoveIt 的世界几何：
+
+```bash
+rosservice call /get_planning_scene "components: {components: 16}"
+```
+
+输出中应包含 `id: table`、box尺寸、位姿，以及 `fixed_boxes` 的各个ID。
+服务返回的 `header.frame_id` 可能已转换为 MoveIt 的规划根，例如 `dummy_link`；
+不能拿该坐标值未经 TF 转换就与 base_link 中的测量值比较。
+RViz 使用 base_link 显示时会做相应转换。
+
+这一步只证明模型加载成功。碰撞是否按预期阻止夹爪穿桌，仍需在后面的规划验证中检查。
+如果当前状态被报为 table/base_link 碰撞，先检查真实底座安装面、桌板高度/膨胀和安装缺口。
+只有确认是实际固定安装接触，才考虑对那个确切底座link建立例外；不能放开夹爪与桌面的碰撞。
+
+### 3.7 在抓取脚本哪一行接入，避免没有桌面模型就运动
+
+在修改版 `grab2016_5_28_3_moveit.py` 中，保留第5节初始化的
+`self.get_scene`、`self.check_validity` 和 `self.scene`。
+将以下函数放进 `PiperVisionController` 类，与 `execute_vision_grasp()` 同级。
+本函数使用第5节已经列出的 `GetPlanningSceneRequest`、`PlanningSceneComponents`、
+`GetStateValidityRequest` import。
+
+```python
+def require_table_scene(self):
+    request = GetPlanningSceneRequest()
+    request.components.components = (
+        PlanningSceneComponents.WORLD_OBJECT_GEOMETRY |
+        PlanningSceneComponents.OCTOMAP |
+        PlanningSceneComponents.ROBOT_STATE |
+        PlanningSceneComponents.ROBOT_STATE_ATTACHED_OBJECTS |
+        PlanningSceneComponents.ALLOWED_COLLISION_MATRIX)
+    scene = self.get_scene(request).scene
+    ids = {obj.id for obj in scene.world.collision_objects}
+    config = rospy.get_param("/bottle_scene")
+    expected = {"table"} | {item["name"] for item in config.get("fixed_boxes", [])}
+    missing = expected - ids
+    if missing:
+        raise RuntimeError("固定障碍尚未加载: " + str(sorted(missing)))
+    if scene.world.octomap.octomap.data:
+        raise RuntimeError("本版要求OctoMap为空，先按第3.5节处理旧地图")
+
+    # 不能让遗留ACM规则把table与机器人的碰撞放开。
+    acm = scene.allowed_collision_matrix
+    names = list(acm.entry_names)
+    defaults = dict(zip(acm.default_entry_names, acm.default_entry_values))
+    robot_links = self.robot.get_link_names()
+    for link in robot_links:
+        if "table" in names and link in names:
+            allowed = acm.entry_values[names.index("table")].enabled[names.index(link)]
+        else:
+            # 保守拒绝涉及table或这个link的默认放行规则。
+            allowed = defaults.get("table", False) or defaults.get(link, False)
+        if allowed:
+            raise RuntimeError("table与机器人link存在碰撞放行规则: " + link)
+
+    validity_request = GetStateValidityRequest()
+    validity_request.robot_state = scene.robot_state
+    validity_request.group_name = ""  # 全机器人，包括夹指和附着物。
+    validity = self.check_validity(validity_request)
+    if not validity.valid:
+        pairs = [(c.contact_body_1, c.contact_body_2) for c in validity.contacts]
+        raise RuntimeError("当前机器人状态无效，先排查模型/实物: " + str(pairs))
+    rospy.loginfo("桌面/固定障碍已加载，OctoMap为空，当前状态有效")
+```
+
+这版检查默认不接受底座/table例外。如果你的安装确实需要该例外，
+在确认确切link和实际固定接触后，显式限定该pair并调整检查，不能删掉整个检查循环。
+
+调用位置是在 `execute_vision_grasp()` 的**第一段运动之前**：
+
+```python
+def execute_vision_grasp(self):
+    rospy.loginfo(">>> 开始瓶子实物视觉抓取任务")
+    self.require_table_scene()  # 新增：第一段运动之前检查。
+
+    # 下一行也必须是第5节的MoveIt运动；不要保留旧joint_pub.publish。
+    self.move_joints([1.521, 0.403, -0.521, 0.0, 0.808, 0.0])
+    # 其余检测、预抓取、接近等流程按第7～10节修改。
+```
+
+如果初始路径可能经过尚未定位的瓶子，应先在当前安全姿态识别，或提前添加已知摆放区的保守模型，
+再去拍照位。桌面检查不能代替尚未建模瓶子的检查。
+
+此函数在缺少模型、残留地图、桌面碰撞被放开或当前状态无效时抛出异常。
+`run()` 应记录错误并结束任务，不能捕获后继续执行下一段运动。
+
+后面第5节只是初始化 MoveIt，第7节只添加瓶子，**不再额外调用旧的 `add_table()`**。
+桌面只由本节加载脚本管理，避免两套参数覆盖同一个 `table` 对象。
+若移动了桌子/基座或改变了固定障碍位置，重新测量、加载并验证后再开始任务。
+
+## 4. 检查机器人碰撞模型
+
+当前加载模型为：
+`piper_description/urdf/piper_description.urdf`。
+当前 SRDF：`piper_with_gripper_moveit/config/piper_description.srdf`。
+
+- `arm` 是 base_link → link6；规划末端明确设为 `link6`。
+- 两根夹指为 `link7`、`link8`；夹爪基座是 `gripper_base`。
+- 三者当前都有 collision mesh。与桌子的检测仍要用已知碰撞状态验证，不能只看 RViz 的 visual。
+- 相机、实际支架、加长夹指、线缆固定件需有相符的 collision 或附着碰撞包络。
+- 反馈是 joint7=q、joint8=-q。joint7 范围 0～0.035 m，完整开口量约为 2q。
+
+当前 URDF 的 joint8 没有 mimic。若用 MoveIt 的 gripper 规划开闭，
+建议在 joint8 内添加以下标记，使预测的两根夹指对称运动；以正在加载的模型为准。
+
+```xml
+<mimic joint="joint7" multiplier="-1" offset="0"/>
+```
+
+本机驱动也发布 joint8=-joint7。修改 URDF 后重启相关 MoveIt/robot_state_publisher 节点，
+检查运行时 robot_description 与 joint7/joint8 的模型、反馈一致。
+不是改了磁盘文件就会自动热加载。
+
+更完整的 SRDF 可把 gripper 声明为 end_effector，但本方案明确用 link6 规划，
+并显式设置 `touch_links=["link7", "link8"]`，不依赖默认 end_effector 名称。
+夹爪基座只有确实参与允许接触时才额外列入，不能放开整个机械臂与瓶子的碰撞。
+
+## 5. 替换底层运动接口
+
+新增 import：
+
+```python
+import copy
+import sys
+import moveit_commander
+import tf2_ros
+import tf2_geometry_msgs  # 注册 PoseStamped 的 TF 转换。
+from moveit_msgs.msg import (
+    DisplayTrajectory, PlanningScene, PlanningSceneComponents,
+    AllowedCollisionEntry,
+)
+from moveit_msgs.srv import (
+    GetPlanningScene, GetPlanningSceneRequest, ApplyPlanningScene,
+    GetStateValidity, GetStateValidityRequest,
+)
+from piper_msgs.srv import Gripper
+```
+
+在 `rospy.init_node()` 之前调用：
+
+```python
+moveit_commander.roscpp_initialize(sys.argv)
+```
+
+删除发布 `/pin_pos_cmd`、发布 `/joint_states` 的 publisher；所有旧的 `publish()` 控制调用都替换。
+删除等待 `/end_pose` 的代码。本方案不依赖旧 Pinocchio 节点。
+初始化改为以下结构；原相机检测初始化仍保留：
+
+```python
+self.tf_buffer = tf2_ros.Buffer()
+self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
+self.robot = moveit_commander.RobotCommander()
+self.scene = moveit_commander.PlanningSceneInterface(synchronous=True)
+self.arm = moveit_commander.MoveGroupCommander("arm")
+self.arm.set_pose_reference_frame("base_link")
+self.arm.set_end_effector_link("link6")
+self.arm.set_planner_id("RRTConnect")
+self.arm.set_planning_time(10.0)
+self.arm.set_num_planning_attempts(8)
+self.arm.set_max_velocity_scaling_factor(0.03)
+self.arm.set_max_acceleration_scaling_factor(0.03)
+self.arm.set_goal_position_tolerance(0.003)
+self.arm.set_goal_orientation_tolerance(0.03)
+self.arm.allow_replanning(False)
+
+# 默认只展示第一段；规划预览不改变真实机器人状态。
+self.execute_motion = bool(rospy.get_param("~execute", False))
+self.display_pub = rospy.Publisher(
+    "/move_group/display_planned_path", DisplayTrajectory,
+    queue_size=1, latch=True)
+for name in ("/get_planning_scene", "/apply_planning_scene",
+             "/check_state_validity"):
+    rospy.wait_for_service(name, timeout=10.0)
+self.get_scene = rospy.ServiceProxy("/get_planning_scene", GetPlanningScene)
+self.apply_scene = rospy.ServiceProxy("/apply_planning_scene", ApplyPlanningScene)
+self.check_validity = rospy.ServiceProxy("/check_state_validity", GetStateValidity)
+```
+
+增加这些核心函数：
+
+```python
+class PlanningOnlyStop(RuntimeError):
+    pass
+
+# 以下函数加入 PiperVisionController 类。
+def current_ee_matrix(self):
+    pose = self.arm.get_current_pose("link6")
+    if pose.header.frame_id.lstrip("/") != "base_link":
+        pose = self.tf_buffer.transform(
+            pose, "base_link", timeout=rospy.Duration(1.0))
+    p = pose.pose
+    T = tf_trans.quaternion_matrix([
+        p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w])
+    T[:3, 3] = [p.position.x, p.position.y, p.position.z]
+    return T
+
+def pose_from_matrix(self, T):
+    T = np.asarray(T, dtype=float)
+    if T.shape != (4, 4) or not np.isfinite(T).all():
+        raise ValueError("目标矩阵无效")
+    p = PoseStamped()
+    p.header.frame_id = "base_link"
+    p.pose.position.x, p.pose.position.y, p.pose.position.z = T[:3, 3]
+    q = tf_trans.quaternion_from_matrix(T)
+    (p.pose.orientation.x, p.pose.orientation.y,
+     p.pose.orientation.z, p.pose.orientation.w) = q
+    return p
+
+def unpack_plan(self, result):
+    if isinstance(result, tuple):
+        if not result[0]:
+            raise RuntimeError("MoveIt 规划失败")
+        result = result[1]
+    if result is None or not result.joint_trajectory.points:
+        raise RuntimeError("MoveIt 返回空轨迹")
+    return result
+
+def validate_trajectory(self, traj):
+    # 全机器人状态检查，同时带上已附着瓶子。
+    req = GetPlanningSceneRequest()
+    req.components.components = (
+        PlanningSceneComponents.ROBOT_STATE |
+        PlanningSceneComponents.ROBOT_STATE_ATTACHED_OBJECTS)
+    state = copy.deepcopy(self.get_scene(req).scene.robot_state)
+    names = list(state.joint_state.name)
+    index = {name: i for i, name in enumerate(names)}
+    for point in traj.joint_trajectory.points:
+        positions = list(state.joint_state.position)
+        for name, value in zip(traj.joint_trajectory.joint_names, point.positions):
+            if name not in index:
+                raise RuntimeError("状态缺少关节 " + name)
+            positions[index[name]] = value
+        # 若轨迹包含夹爪关节，维持当前模型的对称关系。
+        if "joint7" in traj.joint_trajectory.joint_names and "joint8" in index:
+            positions[index["joint8"]] = -positions[index["joint7"]]
+        state.joint_state.position = positions
+        request = GetStateValidityRequest()
+        request.robot_state = state
+        request.group_name = ""  # 检查全机器人，而不是只列出六轴 link。
+        reply = self.check_validity(request)
+        if not reply.valid:
+            pairs = [(c.contact_body_1, c.contact_body_2) for c in reply.contacts]
+            raise RuntimeError("轨迹状态无效/碰撞: " + str(pairs))
+    # 此附加检查检查返回轨迹采样点；点间检查依赖 MoveIt 规划插值分辨率。
+
+def finish_motion(self, traj):
+    self.validate_trajectory(traj)
+    display = DisplayTrajectory()
+    display.trajectory_start = self.robot.get_current_state()
+    display.trajectory.append(traj)
+    self.display_pub.publish(display)
+    if not self.execute_motion:
+        # 首段预览后停止任务；不能把未执行终点当作下一段真实起点。
+        rospy.sleep(1.0)
+        raise PlanningOnlyStop("仅规划，任务在第一段展示后停止")
+    if not self.arm.execute(traj, wait=True):
+        raise RuntimeError("MoveIt/FollowJointTrajectory 执行失败")
+    self.arm.stop()
+
+def move_joints(self, values):
+    if len(values) != 6:
+        raise ValueError("这里只接受六轴目标，不包含夹爪")
+    self.arm.set_start_state_to_current_state()
+    self.arm.set_joint_value_target(dict(zip(
+        ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"], values)))
+    try:
+        self.finish_motion(self.unpack_plan(self.arm.plan()))
+    finally:
+        self.arm.stop()
+        self.arm.clear_pose_targets()
+
+def move_pose(self, T):
+    self.arm.set_start_state_to_current_state()
+    self.arm.set_pose_target(self.pose_from_matrix(T), "link6")
+    try:
+        self.finish_motion(self.unpack_plan(self.arm.plan()))
+    finally:
+        self.arm.stop()
+        self.arm.clear_pose_targets()
+
+def move_cartesian(self, T):
+    self.arm.set_start_state_to_current_state()
+    # 本机安装版本签名没有 jump_threshold 参数。
+    traj, fraction = self.arm.compute_cartesian_path(
+        [self.pose_from_matrix(T).pose], eef_step=0.003,
+        avoid_collisions=True)
+    if fraction < 0.999999 or not traj.joint_trajectory.points:
+        raise RuntimeError("直线段受阻/不可达，完成比例 %.6f" % fraction)
+    # 显式检查关节跳变；上限需结合实际关节速度和采样距离验证。
+    limit = float(rospy.get_param("~cartesian_joint_step_limit", 0.15))
+    previous = dict(zip(self.arm.get_active_joints(),
+                        self.arm.get_current_joint_values()))
+    for point in traj.joint_trajectory.points:
+        current = dict(zip(traj.joint_trajectory.joint_names, point.positions))
+        if any(abs(value - previous[name]) > limit for name, value in current.items()):
+            raise RuntimeError("笛卡尔轨迹关节跳变过大")
+        previous = current
+    traj = self.arm.retime_trajectory(
+        self.robot.get_current_state(), traj,
+        velocity_scaling_factor=0.03,
+        acceleration_scaling_factor=0.03)
+    if not traj.joint_trajectory.points:
+        raise RuntimeError("轨迹时间参数化失败")
+    times = [p.time_from_start.to_sec() for p in traj.joint_trajectory.points]
+    if times[-1] <= 0 or any(b <= a for a, b in zip(times, times[1:])):
+        raise RuntimeError("轨迹时间无效")
+    try:
+        self.finish_motion(traj)
+    finally:
+        self.arm.stop()
+        self.arm.clear_pose_targets()
+```
+
+`move_pose()` 用于去预抓取位、返回、转运等需要绕行的动作。
+`move_cartesian()` 只用于已确认有直线通道的短距离接近、竖直提升、退出。
+直线段受阻时停止或重新选择预抓取方向；不能关掉碰撞检查强行执行。
+3% 是关节速度/加速度缩放比例，不等于旧脚本的 `v=0.02 m/s`。
+
+每次动作前还应确认实机关节反馈新鲜、扫描门关闭、桌面/瓶子模型已同步，且没有其他程序改场景或发运动命令。
+上述函数假设单个任务控制器独占运动和场景更新。
+
+## 6. 核对手眼变换和 TCP，不直接反转旧矩阵
+
+用 MoveIt/TF 获取的 `base_link → link6` 替换旧 `/end_pose`。
+`make_bottle_pose_in_base()` 内应使用拍照停稳时保存的矩阵：
+
+```python
+# get_bottle_pose() 开始时，确认机器人停稳，记录拍照姿态。
+self.current_ee_pose_mat = self.current_ee_matrix()
+# 原 make_bottle_pose_in_base() 的检测变换可继续使用这个固定快照。
+```
+
+原 `T_EE_TO_CAM` 必须实际表示 `link6 → camera_color_optical_frame`。
+RealSense deproject 输出的是光学坐标，不是相机外壳 `camera_link` 坐标。
+从本工作空间已经验证的标定结果核对矩阵，不能因为旧任务能运行就直接认定与新模型完全一致。
+图像采集期间机械臂保持静止；ROS 图像方案应进一步使用采集时刻 TF。
+
+工具变换定义应明确为：
+
+```text
+T_base_link6_target = T_base_tool_target × inverse(T_link6_tool)
+```
+
+原变量 `T_EE_TO_TOOL` 的平移是 -0.14 m，实际使用方式却像 tool→link6 的补偿。
+当前 URDF 的指根位于 link6 正 Z 附近（joint7 原点 z=0.1358 m）。
+因此不能只按变量名把旧 -0.14 矩阵再次求逆。
+实测真正 TCP 后，定义一个含义明确的 `T_LINK6_TOOL`，后续统一使用它的逆：
+
+```python
+# T_LINK6_TOOL 必须实测；TCP 的定义应是实际两夹指抓取中心。
+T_base_tool_grasp = T_base_bottle @ T_BOTTLE_TO_GRASP
+T_grasp_ee = T_base_tool_grasp @ np.linalg.inv(T_LINK6_TOOL)
+```
+
+YOLO 框中心 + 深度百分位得到的是观测表面附近点，未必是瓶子轴线/几何中心。
+用已知瓶子尺寸和桌面高度确定圆柱模型中心；抓取高度单独选取，
+必要时补偿表面到轴线的水平偏差。不要把框中心点直接当圆柱中心、底面和抓取点三者。
+
+## 7. 创建命名瓶子和只针对它的接触权限
+
+添加场景同步函数：
+
+```python
+def wait_object(self, name, known, attached, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while not rospy.is_shutdown() and time.monotonic() < deadline:
+        is_known = name in self.scene.get_known_object_names()
+        is_attached = bool(self.scene.get_attached_objects([name]))
+        if is_known == known and is_attached == attached:
+            return
+        rospy.sleep(0.05)
+    raise RuntimeError("场景对象未同步: " + name)
+
+def add_bottle(self, center_xyz, height, radius):
+    if height <= 0 or radius <= 0:
+        raise ValueError("瓶子尺寸无效")
+    pose = PoseStamped()
+    pose.header.frame_id = "base_link"
+    pose.pose.orientation.w = 1.0  # 瓶子直立，圆柱轴沿 base Z。
+    (pose.pose.position.x, pose.pose.position.y,
+     pose.pose.position.z) = center_xyz
+    self.scene.add_cylinder("target_bottle", pose, height=height, radius=radius)
+    self.wait_object("target_bottle", known=True, attached=False)
+```
+
+直立瓶子圆柱中心 z = 实际桌面 z + 瓶高/2。
+半径可以保守膨胀；底面不要随意向下膨胀，以免制造额外桌面穿透。
+有把手、瓶盖突出部分时使用组合几何，而不是假设单圆柱足够。
+
+ACM 修改必须读取并保留已有矩阵，成对对称地修改。下面只改指定 pair，
+已有机器人自碰撞配置不会被一个全新矩阵清空：
+
+```python
+def get_acm(self):
+    req = GetPlanningSceneRequest()
+    req.components.components = PlanningSceneComponents.ALLOWED_COLLISION_MATRIX
+    return copy.deepcopy(self.get_scene(req).scene.allowed_collision_matrix)
+
+def apply_acm(self, acm):
+    diff = PlanningScene()
+    diff.is_diff = True
+    diff.robot_state.is_diff = True
+    diff.allowed_collision_matrix = acm
+    if not self.apply_scene(diff).success:
+        raise RuntimeError("ACM 更新失败")
+
+def set_contact_pairs(self, pairs, allowed):
+    acm = self.get_acm()
+    for first, second in pairs:
+        for name in (first, second):
+            if name not in acm.entry_names:
+                for row in acm.entry_values:
+                    row.enabled.append(False)
+                acm.entry_names.append(name)
+                acm.entry_values.append(AllowedCollisionEntry(
+                    enabled=[False] * len(acm.entry_names)))
+        i = acm.entry_names.index(first)
+        j = acm.entry_names.index(second)
+        acm.entry_values[i].enabled[j] = bool(allowed)
+        acm.entry_values[j].enabled[i] = bool(allowed)
+    self.apply_acm(acm)
+```
+
+第一次建立任务场景后保存 `self.acm_before_task = self.get_acm()`。
+正常结束再恢复。新对象对应的新条目初始化为禁止；原矩阵的旧条目和默认条目保留。
+如果系统依赖针对“所有新对象”的 default allow 规则，需要审查并收紧该规则；
+不能让 table 因默认权限而失去碰撞检查。
+
+预抓取位之前，瓶子与夹指也禁止碰撞；到了预抓取位，才调用：
+
+```python
+self.set_contact_pairs([
+    ("target_bottle", "link7"),
+    ("target_bottle", "link8"),
+], True)
+```
+
+检查 ACM 中 `table ↔ link7/link8/gripper_base/link6` 没有被放开。
+也不要设置某个夹指的 default_entry 为 True；那会允许它碰其他障碍。
+
+## 8. 夹爪开闭从旧 PosCmd 拆开
+
+原 `gripper_val=100/200` 不能直接移植。当前 SDK/驱动接口以米表示完整开口量。
+joint7=0.035 m 对应约 0.07 m 完整开口。
+
+MoveIt 夹爪组适合空载张开到已知位置；带物体闭合到零位可能因瓶子阻挡而无法满足到位容差。
+可用当前驱动的 `/gripper_srv` 力度限制闭合，手臂仍通过 MoveIt 运动。
+以下是接口用法，服务返回 True 仅表示驱动接收了请求：
+
+```python
+# 首次使用前：
+rospy.wait_for_service("/gripper_srv", timeout=5.0)
+self.gripper_service = rospy.ServiceProxy("/gripper_srv", Gripper)
+
+def command_gripper(self, opening_m, effort):
+    if not self.execute_motion:
+        raise PlanningOnlyStop("仅规划模式不发送夹爪命令")
+    if not (0.0 <= opening_m <= 0.07 and 0.5 <= effort <= 2.0):
+        raise ValueError("夹爪开口/力度参数越界")
+    result = self.gripper_service(
+        gripper_angle=opening_m, gripper_effort=effort,
+        gripper_code=1, set_zero=0)
+    if not result.status:
+        raise RuntimeError("夹爪驱动请求失败")
+```
+
+这个服务绕过 MoveIt 的夹爪轨迹检查，因此发送前必须验证开闭扫掠：
+取完整当前 RobotState（含附着物），按开口变化采样 joint7=q、joint8=-q，
+用第5节的 `/check_state_validity` 检查每个样本，group_name 为空。
+瓶子接触只按当前抓取阶段放开，桌面仍禁止碰撞。
+若不实现这项扫掠检查，改用 MoveIt gripper 规划到经验证的目标开口。
+
+张开后等待 `/joint_states` 中测得的 2×joint7 接近目标，再开始手臂运动。
+闭合后需要测量开口、夹持力度/稳定状态，并结合视觉或任务传感器确认夹持。
+确定“实物已抓住”后才 attach；不能仅靠 time.sleep() 或服务成功返回值判断抓取成功。
+具体成功阈值根据实际瓶子直径、可压缩程度、夹指结构和驱动反馈校验后设定。
+
+## 9. 将原任务按阶段替换
+
+先完成上述几何和接口初始化，再改 `execute_vision_grasp()`。
+
+| 原动作 | 新动作 | 碰撞要求 |
+|---|---|---|
+| 发布拍照 JointState | `move_joints([1.521, 0.403, -0.521, 0, 0.808, 0])` | 桌面/固定场景已经加载 |
+| 检测瓶子 | 停稳后取拍照时 link6 位姿；建立独立圆柱 | 识别点、模型中心、抓取点分别处理 |
+| 到预抓取位 | `move_pose(T_pre_ee)` | OMPL 绕桌边，禁止接触瓶子 |
+| 前探4 cm | 接触权限后 `move_cartesian(T_grasp_ee)` | 全程夹爪与桌面禁止碰撞 |
+| 闭合 | 独立夹爪控制，等待实际夹持确认 | 开闭扫掠也做碰撞检测 |
+| 提升15 cm | attach 后 `move_cartesian(T_lift_ee)` | 携带瓶子，临时处理瓶底与支撑桌面的接触 |
+| 返回零位/转运 | `move_joints(...)` 或 `move_pose(...)` | 瓶子保持附着；新目标也必须可行 |
+| 放置 | 预放置 → 短距离下降/释放 → detach → 退出 | 场景中增加放下的瓶子，夹指退出后取消接触权限 |
+
+不要继续调用旧的 `move_to_target_smooth()`，也不要保留初始、返回和放置阶段的 `joint_pub.publish()`。
+执行失败立即停止后续阶段，禁止自动退回旧 PosCmd 控制。
+
+去拍照位时还没有本次目标位置。如果瓶子或其他活动物可能处在这段路径上，
+应先在当前安全停稳姿态检测，或预先用保守几何覆盖已知摆放区域、验证初始路径。
+不能把尚未定位的物体默认当成不存在。
+
+原抓取姿态固定 grasp X=-base Z，原 grasp Y/Z 由当前姿态投影生成，并非总是 base Y/base X。
+所以预抓取点要按实际 grasp Z 接近轴推算，不能照注释默认其等于全局 X：
+
+```python
+# 以下 dist 必须在瓶子、桌边、机械臂可达性下选择，不是通用参数。
+T_pre_tool = T_base_tool_grasp.copy()
+approach_axis = T_base_tool_grasp[:3, 2]
+T_pre_tool[:3, 3] -= approach_axis * pregrasp_distance
+T_pre_ee = T_pre_tool @ np.linalg.inv(T_LINK6_TOOL)
+
+T_lift_ee = T_grasp_ee.copy()
+T_lift_ee[2, 3] += lift_distance  # base Z 竖直提升，姿态保持。
+```
+
+根据桌边和瓶子位置，生成多个水平接近方向：面向瓶子的外侧、左右侧等。
+对每个方向先验证最终抓取状态，然后验证短直线段及可达预抓取路径，成功才选择该候选。
+最终夹爪最低点至少高于实测桌面加所选误差余量。
+TCP 高于桌面不能代替整个夹爪 collision 的检查。
+
+如果要求全程保持夹爪水平，需要增加 OrientationConstraint 并验证可行性；
+仅设置水平目标姿态不能保证 OMPL 中途也保持水平。
+夹持转运也应根据瓶子是否允许倾斜选择约束，防止绕行中甩动或滑落。
+
+## 10. 抓住后附着，并处理支撑接触
+
+夹持确认之后：
+
+```python
+self.scene.attach_object(
+    "target_bottle", link="link6", touch_links=["link7", "link8"])
+self.wait_object("target_bottle", known=False, attached=True)
+```
+
+附着的是实际瓶子几何，姿态需对应真实抓住的位置。若接近时瓶子滑动，先更新模型。
+不能在尚未抓住时 attach：否则模型会提前随机器人移动。
+
+瓶子此时仍在桌上。桌面膨胀、几何相切和数值误差可能让附着瓶底与桌面被判为碰撞。
+可只在第一段竖直抬起中允许该瓶子与支撑桌面接触：
+
+```python
+# 保存当前阶段的 ACM，提升后只还原本阶段权限。
+acm_before_lift = self.get_acm()
+self.set_contact_pairs([("target_bottle", "table")], True)
+self.move_cartesian(T_lift_ee)
+# 此时必须确认瓶底已离开膨胀桌面（并达到误差余量）。
+self.apply_acm(acm_before_lift)
+# 之后立即用 /check_state_validity 验证当前全机器人状态，再继续转运。
+```
+
+只能在姿态固定、沿 base Z 向上的提起段放开这一个 pair；
+不能借这个例外水平穿过桌板，也不能放开任意机器人 link 与 table 的碰撞。
+如果支撑桌面仍以 OctoMap 体素表示，还可能有瓶底对 `<octomap>` 的接触：
+优先把抓取区域支撑几何用实测 box 独立表示，并确保瓶子之外的体素准确，
+或采用专门支持支撑接触的抓放实现；不要因此放开整个瓶子与所有 OctoMap 障碍。
+对本方案，最易调试的初始版本是该桌子使用 box、其他固定障碍使用 box/无目标物的冻结地图。
+
+放置时先规划到瓶底位于桌面以上的预放置位。
+如果最终下降到支撑面，需要同样只临时处理 bottle/table 接触。
+松开后 `remove_attached_object("link6", name="target_bottle")`，
+查询状态并把世界对象的位置校正为实测放置位置。
+夹指退出前保留 bottle/finger 例外；退出成功后禁止接触并恢复任务前 ACM。
+不能先删除场景中所有瓶子再撤退。
+
+如果中途失败：停止运动，保留与真实夹持状态相符的 attached/world 模型，记录当前权限，
+不要在异常清理中自动松爪、detach、回零或删除真实障碍。
+
+## 11. 启动顺序与完整验证
+
+以下命令是修改之后由操作者运行的步骤，本次没有运行。
+
+### A. 场景准备阶段
+
+第一版若全部使用几何对象，加载所有测量好的障碍后即可验证，
+无需启动相机点云或扫描门；如果旧 OctoMap 仍在，明确停止更新并在几何替代完整后清空。
+下面是组合点云地图的扩展流程，抓取区桌面点的分割和 box 替代须先完成。
+
+启动实机 MoveIt 前确认机械臂初始状态、环境、急停和模型。
+这个 launch 默认会尝试使能机械臂；它不是纯离线查看模型。
+
+```bash
+roslaunch piper_with_gripper_moveit piper_real.launch can_port:=can0 auto_enable:=true
+```
+
+其他终端分别启动相机、已验证的外参和扫描门：
+
+```bash
+roslaunch moveit_ctrl eye_in_hand_camera.launch enable_pointcloud:=true
+roslaunch /home/hank/piper_ws/calibration/eye_in_hand_d435i/session_02/camera_extrinsics.launch
+roslaunch moveit_ctrl static_scene_mapping.launch
+```
+
+移走待抓瓶子并确认已知安全视角后，依次 clear/start、多视角扫描、stop：
+
+```bash
+rosrun moveit_ctrl static_scan_control.py stop
+rosrun moveit_ctrl static_scan_control.py clear
+rosrun moveit_ctrl static_scan_control.py start
+# 在已确认安全的多个视角停稳采集；这些命令不会自动扫描移动机械臂。
+rosrun moveit_ctrl static_scan_control.py stop
+rosrun moveit_ctrl static_scan_control.py status
+```
+
+RViz 中检查桌面、桌边和固定障碍，确认没有待抓瓶子体素；
+检查抓取区支撑面已由 box 覆盖，并没有会阻碍带瓶提升的重复桌面体素。
+status 应为 enabled=false；将瓶子放回后不再 start。
+保留直接 SDK 检测时，接着停止 ROS 相机 launch，确认设备释放。
+
+### B. 接口和模型检查
+
+```bash
+rostopic info /joint_states
+rostopic echo -n 1 /joint_states
+rosnode info /piper_ctrl_single_node
+rosservice list
+rosparam get /move_group/arm/longest_valid_segment_fraction
+```
+
+`/joint_states` 的真实反馈应由驱动发布，不应出现抓取脚本或旧 Pinocchio 控制节点发布伪反馈。
+最后一个参数的命名以实际命名空间为准；当前配置文件给 arm 设置的是 0.005。
+桌边很薄时，应评估 OMPL 离散碰撞检查的采样分辨率，不能只提高地图分辨率。
+
+验证 `/arm_controllers/follow_joint_trajectory`、`/gripper_srv`、
+`/get_planning_scene`、`/apply_planning_scene`、`/check_state_validity` 都存在。
+URDF 的 link7/link8、TCP、相机外参和真实实物必须一致。
+
+### C. 先预览，再分段执行
+
+```bash
+/usr/bin/python3 /home/hank/piper_ws/src/piper_ros/src/bottle_grab/grab2016_5_28_3_moveit.py _execute:=false
+```
+
+按第5节代码，此命令只展示第一段规划后停止。
+应在 `run()` 中捕获 `PlanningOnlyStop` 并记录日志，在 finally 中保持原相机释放逻辑并 shutdown MoveIt。
+初始化相机失败时也要处理 pipeline 未创建的情况。
+
+若要检查完整未来序列，需要在离线机器人/虚拟状态中逐段更新 RobotState、夹爪和附着物，
+不能对真实机器人连续做 plan 但不 execute，然后假装每一段都从前一段终点开始。
+可使用独立 ROS master 的 fake `demo.launch`，以记录的目标和同一场景检查路径；不要与实机反馈混用。
+
+至少验证以下结果：
+
+1. 故意给出一个夹指穿桌的目标，`/check_state_validity` 报出 table/link7 或 table/link8，规划拒绝。
+2. 合法目标有可执行轨迹；绕行时手腕、夹爪、相机都在模型内，桌边没有被忽略。
+3. 靠近瓶子时只有 target_bottle/link7、target_bottle/link8 允许接触。
+4. 最终抓取状态和短直线段完整有效；fraction 不完整时任务终止，不闭爪。
+5. 真正抓住后，场景中可见 AttachedCollisionObject，抬起/返回轨迹检查包含瓶子。
+6. 提升结束后撤回 bottle/table 支撑例外，并验证完整当前状态。
+7. MoveIt/action、夹爪确认或 TF/反馈任一失败，后续状态不再执行。
+8. 放置、撤退、返回也走 MoveIt，场景中的新瓶子位置同步。
+
+逐段确认后才用 `_execute:=true` 进行低速实机验证；它会发运动命令和夹爪命令。
+新脚本中的等待应依赖到位/抓取反馈，而不是沿用原固定 sleep 时间。
+
+## 12. 本机查证依据
+
+- 原比赛脚本：构造函数第263行附近；旧运动函数第323行；任务状态序列第513行。
+- `piper_with_gripper_moveit/launch/piper_real.launch`：实机 trajectory action、命令反馈分离。
+- `piper_with_gripper_moveit/config/piper_description.srdf`：arm、gripper、open/close。
+- `piper_description/urdf/piper_description.urdf`：夹指 collision、joint7/joint8。
+- `piper/scripts/piper_ctrl_single_node.py`：第419行夹爪话题；第472行夹爪服务；实测反馈 q/-q。
+- `piper_msgs/srv/Gripper.srv`：完整开口量和力度请求字段。
+- 本机 `/opt/ros/noetic/lib/python3/dist-packages/moveit_commander/move_group.py`：
+  `compute_cartesian_path(waypoints, eef_step, avoid_collisions=True, path_constraints=None)`；
+  `retime_trajectory()` 的速度和加速度参数。
+- 同目录 `planning_scene_interface.py`：同步场景接口、attach_object、add_cylinder。
+
+接口核对来自当前本机文件。没有做目标桌面测量、真实 TCP/夹指包络标定、完整脚本改造或实机路径验证。
