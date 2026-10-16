@@ -507,6 +507,7 @@ if __name__ == "__main__":
 
 ```bash
 # 如果提示符有(base)或其他已激活的Conda环境，先执行conda deactivate。
+conda deactivate
 source /opt/ros/noetic/setup.bash
 source /home/hank/piper_ws/devel/setup.bash
 ```
@@ -648,8 +649,8 @@ rosparam get /camera_table_scan
 本次修正后实际使用的局部搜索范围为：
 
 ```yaml
-roi_min: [0.15, -0.30, -0.13]
-roi_max: [0.65,  0.30, -0.07]
+roi_min: [0.15, -0.30, -0.50]
+roi_max: [0.65,  0.30, 0.50]
 ```
 
 它覆盖本次点云中约 `Z=-0.098 m` 的表面，不是跨场景通用默认值。
