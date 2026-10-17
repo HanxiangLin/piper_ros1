@@ -1,0 +1,66 @@
+# 用法：python moveit_grab.py _params_file:=/完整路径/moveit_grab_params.yaml
+# 命令行私有参数优先于此文件。MEASURE必须替换为实测数字/路径。
+# 本模板不配置相机扫描ROI；相机建图仍使用camera_table_scan.yaml。
+execute: false
+model_path: /home/hank/piper_ws/src/piper_ros/src/bottle_grab/bottle.pt
+hand_eye_calibration: /home/hank/piper_ws/calibration/eye_in_hand_d435i/session_02/result.json
+# 选择当前加载到MoveIt中、与当前桌面高度一致的那次扫描JSON。
+# 不要因为scan_01存在就默认使用它；加高桌面后需重扫。
+table_model: /home/hank/piper_ws/calibration/bottle_grasp_scan/scan_01/table_model.json
+
+# link6->抓取中心的平移(m)和旋转(rad)，不是tool->link6。
+# 原为0.14，但需要改成末端到夹持点的距离。
+link6_tool_xyz: [0, 0, 0.10]
+link6_tool_rpy: [0.0, 0.0, 0.0]
+
+bottle_height: 0.17
+bottle_radius: 0.03
+# 接触点距拟合桌面上表面的高度(m)，必须位于瓶身内。
+grasp_height_from_table: 0.07
+# 默认使用检测像素射线与扫描桌面/瓶高反算瓶子轴线中心，
+# 不把相机看到的前表面当成瓶子中心。
+estimate_bottle_center_from_table: true
+# 反算后仍存在的、经过实物验证的base_link X/Y残差；初始保持0。
+bottle_center_offset_xy: [0.0, 0.0]
+pregrasp_distance: 0.10
+lift_distance: 0.15
+support_edge_margin: 0.02
+lift_clearance: 0.03
+
+# 完整夹爪开口(m)；joint7/joint8各为开口的一半。
+gripper_opening_open: 0.07
+gripper_opening_close_command: 0.0
+gripper_effort: 1.0
+# 闭合后实测开口范围与负载阈值，按真实瓶子/夹指/驱动反馈校验。
+# 要求：闭合目标 < min < max < 张开目标。
+grasp_opening_min: 0.035
+grasp_opening_max: 0.065
+grasp_effort_min: 0.30
+# 可接额外视觉/夹持传感器的Trigger服务：success=true表示确认抓住。
+# 未填写则依赖经过实物校验的开口+负载+稳定时间，仍不能证明无滑移。
+grasp_check_service: ""
+gripper_feedback_timeout: 4.0
+gripper_settle_time: 1.5
+
+velocity_scale: 0.03
+acceleration_scale: 0.03
+planning_time: 10.0
+planning_attempts: 8
+cartesian_joint_step_limit: 0.15
+approach_yaw_offsets_deg: [0.0, 30.0, -30.0]
+show_detection_window: true
+# null代表任意颜色，可选bottle-y、bottle-g、bottle-b。
+target_bottle_label: null
+
+# 默认用当前停稳姿态识别，避免移动时尚未定位瓶子。
+move_to_photo_pose: false
+photo_joint_target: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+# 空列表表示提升后不再自动回零/转运。
+post_grasp_joint_target: []
+
+# 可选：在同一个命名table上放置。另一个盒子/桌子需扩展支撑模型。
+enable_place: false
+# 启用时填写base_link下TCP的[x,y,z,roll,pitch,yaw]，m/rad。
+# 代码根据夹持时相对变换检查瓶底是否处于table平面±5mm内。
+# place_tool_pose: [MEASURE, MEASURE, MEASURE, MEASURE, MEASURE, MEASURE]
+# place_approach_height: MEASURE

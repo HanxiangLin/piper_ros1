@@ -1606,3 +1606,402 @@ read -r -p "瓶底离开包络后的提升余量(m): " PIPER_LIFT_CLEARANCE
 本机已生成scan_01/table_model.json；这项结果仅确认采集/拟合完成。
 桌面识别覆盖、过滤后环境地图、真实TCP/夹指包络、完整抓取流程和实机路径仍需分别验证。
 扫描地图是固定场景规划依据，冻结后不提供动态实时避障。
+
+## 13. 已整理的实际抓取脚本 moveit_grab.py（2026-10-16）
+
+前面各节解释原理和核心片段。已经修改的实际脚本是：
+
+```text
+/home/hank/piper_ws/src/piper_ros/src/bottle_grab/moveit_grab.py
+```
+
+不要再把片段中的局部变量计算放在文件顶层，也不要保留旧PosCmd或JointState目标发布。
+当前脚本使用MoveIt执行全部手臂运动，默认仅预览第一段；
+实际开爪、闭爪使用/gripper_srv，并在命令前检查joint7/joint8的完整扫掠。
+
+### 13.1 填写任务参数文件
+
+参数模板已创建：
+
+```text
+/home/hank/piper_ws/src/piper_ros/src/bottle_grab/moveit_grab_params.yaml
+```
+
+所有MEASURE必须填写，尤其是本次table_model路径、link6到TCP的实测变换、
+瓶高/半径、抓取高度、接近/提升距离、余量以及夹持开口/负载阈值。
+程序会在第一段运动前检查缺失参数和数值，不能用未经验证的尺寸填充。
+`table_model`必须对应当前已经加载到MoveIt的table与环境地图，桌面加高后不能复用旧批次。
+相机变换直接读取hand_eye_calibration中的ee_T_camera（link6→彩色光学坐标系），
+避免沿用原比赛脚本的旧矩阵；相机安装变化后仍需重新标定并更新参数。
+
+### 13.2 启动与只规划预览
+
+本节是**不发送手臂轨迹的只规划预览流程**。它要求真实关节反馈、冻结的环境地图、
+自动 `table` 模型、扫描门状态服务和当前夹爪反馈都可用；但 `_execute:=false` 不会执行
+MoveIt轨迹，也不会通过 `/gripper_srv` 张爪或闭爪。当前脚本直接通过RealSense SDK打开相机，
+因此必须先停止ROS相机launch释放D435i；扫描门仍需保持运行但关闭。
+
+下面假设当前使用的是：
+
+```text
+table模型：/home/hank/piper_ws/calibration/bottle_grasp_scan/scan_01/table_model.json
+环境地图：/home/hank/piper_ws/calibration/bottle_grasp_scan/scan_01/environment.bag
+```
+
+如果桌面加高或环境、机械臂底座、相机安装发生变化，先按第3节生成新的扫描目录，
+将下面两个路径全部替换为同一次扫描生成的 `table_model.json` 和 `environment.bag`。
+不能只换其中一个文件。
+
+#### 13.2.1 启动前提和终端分工
+
+建议使用以下终端：
+
+| 终端 | 作用 | 预览阶段是否保持运行 |
+|---|---|---|
+| 终端1 | CAN、Piper实机驱动、MoveIt、robot_state_publisher | 保持 |
+| 终端2 | 静态扫描门，默认关闭 | 保持 |
+| 终端3 | 场景恢复、状态检查、夹爪检查 | 执行命令后可继续使用 |
+| 终端4 | 视觉预览脚本 | 运行期间保持，结束后查看日志 |
+
+每个终端先执行：
+
+```bash
+conda deactivate 2>/dev/null || true
+source /opt/ros/noetic/setup.bash
+source /home/hank/piper_ws/devel/setup.bash
+
+rospack find piper_with_gripper_moveit
+rospack find moveit_ctrl
+```
+
+输出应指向 `/home/hank/piper_ws/src/...`。不要在这些终端再 source 比赛工作空间。
+
+#### 13.2.2 终端1：检查CAN并启动实机MoveIt
+
+这一步会启动真实驱动、MoveIt和机械臂TF；不会因为 `auto_enable:=false` 自动使能电机。
+启动前确认机器人停在安全姿态、急停可用、周围无人，且没有另一套Piper驱动占用CAN。
+
+先检查CAN：
+
+```bash
+ip -br link show type can
+ip -details link show can0
+```
+
+如果还没有 `can0`，并且确认系统只识别到一个属于Piper的USB-CAN适配器，执行：
+
+```bash
+bash /home/hank/piper_ws/src/piper_ros/can_activate.sh can0 1000000
+ip -details link show can0
+```
+
+如果接口名称不是 `can0`，将后续 `can_port:=can0` 改为实际名称。
+CAN配置命令需要sudo时，在本地终端输入密码；它不发送抓取轨迹。
+
+启动实机MoveIt：
+
+```bash
+roslaunch piper_with_gripper_moveit piper_real.launch \
+  can_port:=can0 auto_enable:=false
+```
+
+保持该终端运行。启动完成后，在终端3检查：
+
+```bash
+timeout 5s rostopic echo -n 1 /joint_states
+timeout 5s rosrun tf tf_echo base_link link6
+```
+
+`/joint_states`必须包含 `joint1`～`joint8` 的真实反馈；`base_link → link6` 必须连通。
+如果驱动报 `CAN socket can0 does not exist` 或 `piper_ctrl_single_node process has died`，
+先修复CAN，不能继续预览。
+
+#### 13.2.3 终端2：启动静态扫描门，但保持关闭
+
+如果此前运行的扫描门终端已经关闭，重新启动：
+
+```bash
+roslaunch moveit_ctrl static_scene_mapping.launch \
+  input_cloud:=/piper/table_scan/environment_points
+```
+
+当前扫描方案的点云链路是：
+
+```text
+相机点云 → camera_table_scene.py filter
+→ /piper/table_scan/environment_points
+→ /piper_static_scan_gate
+→ /piper/static_scan/points
+→ MoveIt OctoMap
+```
+
+预览阶段不需要启动相机或过滤器，因为地图已经冻结；扫描门节点只为提供状态服务。
+终端3确认它关闭：
+
+```bash
+rosrun moveit_ctrl static_scan_control.py status
+```
+
+状态中的 `enabled` 必须为 `false`。如果是 `true`，执行：
+
+```bash
+rosrun moveit_ctrl static_scan_control.py stop
+```
+
+不要在预览阶段执行 `start` 或 `clear`。`start` 会继续向OctoMap输入点云，
+`clear` 会清空当前地图。
+
+#### 13.2.4 终端3：恢复当前批次的table和环境OctoMap
+
+如果刚刚重启过MoveIt，磁盘上的文件不会自动加载到当前内存场景。先加载 `table`：
+
+```bash
+/usr/bin/python3 \
+  /home/hank/piper_ws/src/piper_ros/src/piper_moveit/moveit_ctrl/scripts/camera_table_scene.py \
+  load \
+  --model /home/hank/piper_ws/calibration/bottle_grasp_scan/scan_01/table_model.json
+```
+
+再恢复环境OctoMap：
+
+```bash
+/usr/bin/python3 \
+  /home/hank/piper_ws/src/piper_ros/src/piper_moveit/moveit_ctrl/scripts/static_scene_snapshot.py \
+  load \
+  --input /home/hank/piper_ws/calibration/bottle_grasp_scan/scan_01/environment.bag \
+  --expected-frame dummy_link \
+  --replace
+```
+
+`--replace`只替换MoveIt内存中的OctoMap，不删除磁盘文件；这些命令不会移动机械臂。
+若当前场景已经有正确的 `table` 和非空地图，不需要重复执行恢复命令。
+
+检查地图与扫描门：
+
+```bash
+/usr/bin/python3 \
+  /home/hank/piper_ws/src/piper_ros/src/piper_moveit/moveit_ctrl/scripts/static_scene_snapshot.py \
+  inspect
+
+rosrun moveit_ctrl static_scan_control.py status
+
+rosservice call /get_planning_scene "components: {components: 16}"
+```
+
+预期条件：
+
+```text
+MoveIt OctoMap：非空
+frame: dummy_link
+扫描门：enabled=false
+RViz中能看到正确位置的table和环境体素
+```
+
+如果抓取脚本随后报“环境OctoMap为空、无效或坐标系错误”，先重新执行这一步，
+不要修改视觉或抓取参数来掩盖场景未恢复问题。
+
+#### 13.2.5 终端3：确认相机已释放、TF和夹爪状态
+
+当前抓取脚本直接调用 `pyrealsense2`，不能与ROS相机节点同时占用D435i。
+如果终端中还有下面的ROS相机launch，按 `Ctrl+C` 停止它：
+
+```bash
+roslaunch moveit_ctrl eye_in_hand_camera.launch enable_pointcloud:=true
+```
+
+然后确认没有其他程序占用相机：
+
+```bash
+ps -ef | grep -E 'realsense|pyrealsense|camera_table_scene' | grep -v grep
+```
+
+保留实机MoveIt、扫描门和手眼外参节点；停止ROS相机只释放相机设备，
+不会删除已恢复的table或OctoMap。
+
+确认完整TF仍存在：
+
+```bash
+timeout 5s rosrun tf tf_echo base_link camera_depth_optical_frame
+```
+
+预览不会发送夹爪命令。实际夹爪必须已经张开到参数中的：
+
+```yaml
+gripper_opening_open: 0.07
+```
+
+如果夹爪没有张开，单独调用下面的服务会让真实夹爪运动；先确认夹爪前方没有障碍：
+
+```bash
+rosservice call /gripper_srv \
+  "{gripper_angle: 0.07, gripper_effort: 1.0, gripper_code: 1, set_zero: 0}"
+```
+
+然后读取反馈：
+
+```bash
+timeout 5s rostopic echo -n 1 /joint_states
+```
+
+应有近似：
+
+```text
+joint7 ≈  0.035
+joint8 ≈ -0.035
+完整开口 = joint7 - joint8 ≈ 0.070 m
+```
+
+服务返回 `True` 只表示驱动接受请求；若实际开口没有变化，先检查夹爪使能、CAN反馈、
+夹爪故障和 `/joint_states`，不要直接把 `gripper_opening_open` 改成当前闭合值。
+
+#### 13.2.6 清理上次残留的target_bottle（仅确认夹爪空载时）
+
+脚本不会覆盖已有的 `target_bottle`，因为它可能仍附着在真实夹爪上。
+先查询当前状态；如果夹爪空载、瓶子不在夹指中，才删除旧的世界对象：
+
+```bash
+/usr/bin/python3 - <<'PY'
+import sys
+import rospy
+import moveit_commander
+
+moveit_commander.roscpp_initialize(sys.argv)
+rospy.init_node("remove_old_target_bottle", anonymous=True)
+try:
+    rospy.wait_for_service("/get_planning_scene", timeout=5.0)
+    rospy.wait_for_service("/apply_planning_scene", timeout=5.0)
+    scene = moveit_commander.PlanningSceneInterface(synchronous=True)
+    name = "target_bottle"
+    if scene.get_attached_objects([name]):
+        raise RuntimeError("target_bottle仍附着在机器人上，拒绝删除")
+    if name in scene.get_known_object_names():
+        scene.remove_world_object(name)
+        rospy.sleep(0.2)
+        if name in scene.get_known_object_names():
+            raise RuntimeError("target_bottle删除未确认成功")
+        print("已删除旧世界对象target_bottle；未修改table或OctoMap")
+    else:
+        print("没有target_bottle，无需删除")
+finally:
+    moveit_commander.roscpp_shutdown()
+PY
+```
+
+如果发现对象仍附着，停止这里的清理操作，先确认真实夹持状态；
+不能用删除规划对象来掩盖真实瓶子仍在夹爪上的情况。
+
+#### 13.2.7 加载参数并运行只规划预览
+
+视觉依赖已经安装在工作空间虚拟环境 `/home/hank/piper_ws/.venv-vision`。
+不要用 `/usr/bin/python3`运行此脚本，否则找不到 `pyrealsense2`或`ultralytics`。
+
+先确认参数文件中的路径是当前同一批次：
+
+```bash
+grep -E '^(execute|table_model|hand_eye_calibration|link6_tool_xyz|bottle_height|bottle_radius|grasp_height_from_table|pregrasp_distance|lift_distance|support_edge_margin|lift_clearance|gripper_opening_open|grasp_opening_min|grasp_opening_max|grasp_effort_min):' \
+  /home/hank/piper_ws/src/piper_ros/src/bottle_grab/moveit_grab_params.yaml
+
+test -f /home/hank/piper_ws/calibration/bottle_grasp_scan/scan_01/table_model.json
+test -f /home/hank/piper_ws/calibration/bottle_grasp_scan/scan_01/environment.bag
+```
+
+运行预览：
+
+```bash
+/home/hank/piper_ws/.venv-vision/bin/python \
+  /home/hank/piper_ws/src/piper_ros/src/bottle_grab/moveit_grab.py \
+  _params_file:=/home/hank/piper_ws/src/piper_ros/src/bottle_grab/moveit_grab_params.yaml \
+  _execute:=false
+```
+
+预览阶段的真实数据流是：
+
+```text
+当前真实/joint_states反馈
+→ 当前停稳link6姿态
+→ RealSense SDK图像/深度/YOLO检测
+→ link6→camera_color_optical_frame→base_link
+→ 创建target_bottle碰撞体
+→ OMPL预抓取规划
+→ 虚拟预抓取终点的直线接近碰撞检查
+→ RViz显示第一段轨迹
+```
+
+预期日志包括：
+
+```text
+冻结场景、table模型和当前机器人状态检查通过
+YOLO与RealSense初始化完成
+检测成功: ...
+抓取候选通过: 水平偏转...度
+仅规划模式：第一段轨迹已显示，未发送运动命令
+```
+
+只规划模式不会：
+
+- 移动手臂；
+- 张开或闭合夹爪；
+- 执行预抓取轨迹；
+- 执行最后的接近、提升或放置；
+- 自动假设机器人已经到达规划终点。
+
+它会读取真实夹爪开口；如果实际开口与 `gripper_opening_open` 相差超过容差，
+会在规划前停止。它也会创建临时 `target_bottle`；正常只规划停止时会清理该临时对象和权限。
+
+在RViz中检查：
+
+1. 当前机器人状态和真实机械臂姿态一致。
+2. `table`、OctoMap、`target_bottle`和实物位置一致。
+3. 预抓取轨迹绕开桌边，夹爪碰撞模型没有穿过桌面。
+4. 预抓取终点到抓取位的直线接近路径完整，且接近方向合理。
+5. 目标瓶子模型的半径、中心和TCP与实物一致；不能只看机械臂是否碰到虚拟瓶子。
+
+预览成功只证明场景和候选轨迹通过了当前离线碰撞检查，**不证明实机TCP、手眼外参、
+深度轴线、夹爪模型和实际轨迹跟踪误差已经正确**。确认这些内容后，再进入第13.3节的低速分段执行。
+
+### 13.3 执行行为和错误处理
+
+完成实测参数及轨迹检查后，将上面命令的_execute设为true，会发送真实运动和夹爪命令。
+本次脚本修改没有运行这条实机执行命令。
+
+执行顺序为：
+
+```text
+冻结场景/反馈检查 → 当前姿态识别（或可选MoveIt拍照位）
+→ 张爪 → 创建目标瓶子 → 检查预抓取/接近候选
+→ MoveIt到预抓取位 → 仅允许目标瓶子与link7/link8接触
+→ 碰撞检查下短直线接近 → 闭合 → 开口+负载持续稳定检查
+→ 附着瓶子 → 仅临时允许目标瓶子/table支撑接触 → 沿base Z提升
+→ 再确认夹持 → 验证瓶底离开包络 → 撤回支撑例外并检查全机器人状态
+```
+
+`grasp_effort_min`使用/joint_states里joint7的实测effort值，
+其单位和阈值应结合驱动与实物验证；不能把命令effort或服务成功当作实测夹持。
+可用grasp_check_service接入额外的视觉/夹持传感器Trigger确认。
+开口/负载检查也无法识别所有误夹和滑移，实际确认仍需任务传感器校验。
+
+默认提升后保持瓶子附着，不自动回零或松爪。
+post_grasp_joint_target用于可选的带瓶转运；enable_place默认false。
+需要放置时，place_tool_pose给出base_link下的实际TCP位姿，
+当前实现仅支持同一个table包络内、瓶身直立的放置，
+会检查瓶底高度和支撑覆盖；原脚本“再检测瓶子图片后悬空释放”的流程未直接照搬。
+程序会保留放下瓶子的世界碰撞对象，夹指撤离后取消接触权限。
+
+任一规划、碰撞、反馈、夹持或场景检查失败，立即停止后续阶段，
+不回退PosCmd，不自动松爪、解除附着或回零，保留失败时真实夹持对应的场景供检查。
+再次启动前应核对已有target_bottle，不直接覆盖或删除上一次的附着物。
+
+### 13.4 本次验证范围
+
+已做离线回归：模块导入、变换方向、部分/无效直线路径拒绝、
+预览不执行、场景变化拒绝执行、夹爪扫掠桌面碰撞、
+ACM对称更新并保留原权限、未确认夹持时不附着/提升、
+带瓶提升阶段的接触例外及轨迹点间细分碰撞检查。
+测试不启动ROS master、相机或CAN，也不发送实机命令。
+
+```bash
+source /opt/ros/noetic/setup.bash
+source /home/hank/piper_ws/devel/setup.bash
+/usr/bin/python3 \
+  /home/hank/piper_ws/src/piper_ros/src/bottle_grab/tests/test_moveit_grab.py
+```

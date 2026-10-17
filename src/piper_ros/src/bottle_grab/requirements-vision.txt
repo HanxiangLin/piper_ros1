@@ -1,0 +1,10 @@
+# Ubuntu 20.04 / Python 3.8；安装到工作空间.venv-vision。
+# CPU版PyTorch避免下载与本次运行无关的CUDA运行库。
+--index-url https://pypi.org/simple
+--extra-index-url https://download.pytorch.org/whl/cpu
+numpy==1.24.4
+opencv-python==4.10.0.84
+torch==2.4.1+cpu
+torchvision==0.19.1+cpu
+ultralytics==8.3.0
+pyrealsense2==2.55.1.6486
