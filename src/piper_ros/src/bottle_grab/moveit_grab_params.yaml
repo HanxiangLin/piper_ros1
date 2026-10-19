@@ -52,14 +52,14 @@ show_detection_window: true
 # null代表任意颜色，可选bottle-y、bottle-g、bottle-b。
 target_bottle_label: null
 
-# 默认用当前停稳姿态识别，避免移动时尚未定位瓶子。
-move_to_photo_pose: false
+# 默认（false）用当前停稳姿态识别，避免移动时尚未定位瓶子。
+move_to_photo_pose: true
 photo_joint_target: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 # 空列表表示提升后不再自动回零/转运。
 post_grasp_joint_target: []
 
 # 可选：在同一个命名table上放置。另一个盒子/桌子需扩展支撑模型。
-enable_place: false
+enable_place: true
 # 启用时填写base_link下TCP的[x,y,z,roll,pitch,yaw]，m/rad。
 # 代码根据夹持时相对变换检查瓶底是否处于table平面±5mm内。
 # place_tool_pose: [MEASURE, MEASURE, MEASURE, MEASURE, MEASURE, MEASURE]

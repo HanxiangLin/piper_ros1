@@ -380,14 +380,14 @@ class PiperVisionController:
         self.gripper_settle_time = self._finite_float(
             "~gripper_settle_time", 1.5, 0.0, 10.0)
 
-        self.move_to_photo_pose = bool(rospy.get_param("~move_to_photo_pose", False))
+        self.move_to_photo_pose = bool(rospy.get_param("~move_to_photo_pose", True))
         self.photo_joint_target = self._numeric_list(
             "~photo_joint_target",
             rospy.get_param("~photo_joint_target",
-                            [1.521, 0.403, -0.521, 0.0, 0.808, 0.0]), 6)
+                            [0, 0, 0, 0.0, 0, 0.0]), 6)
         self.post_grasp_joint_target = self._optional_numeric_list(
             "~post_grasp_joint_target", 6)
-        self.enable_place = bool(rospy.get_param("~enable_place", False))
+        self.enable_place = bool(rospy.get_param("~enable_place", True))
         if self.enable_place:
             self.place_tool_pose = self._numeric_list(
                 "~place_tool_pose", rospy.get_param("~place_tool_pose"), 6)
@@ -637,8 +637,8 @@ class PiperVisionController:
 
     def get_bottle_pose(self, target_label=TARGET_BOTTLE_LABEL, max_frames=60):
         """Detect one bottle and return its observed pose in base_link."""
-        self.current_ee_pose_mat = self.current_ee_matrix()
-        reference_joints = self._fresh_joint_positions()
+        self.current_ee_pose_mat = self.current_ee_matrix() # 获取当前link6的位姿
+        reference_joints = self._fresh_joint_positions()    # 记录此时各关节的真实弧度作为基准
         # 丢弃缓冲中的旧画面；SDK时间域不同，不将其毫秒时间戳冒充ROS时间。
         for _ in range(5):
             self.pipeline.wait_for_frames(timeout_ms=5000)
@@ -914,6 +914,7 @@ class PiperVisionController:
         return pose
 
     @staticmethod
+    # 规范化 moveit_commander 返回的 RobotTrajectory
     def unpack_plan(result):
         if isinstance(result, tuple):
             if not result[0]:
@@ -1228,7 +1229,7 @@ class PiperVisionController:
 
     def plan_grasp_candidate(self, observed_bottle):
         """Plan pregrasp + complete approach before moving, using virtual start state."""
-        center, _, _ = self.build_grasp_targets(observed_bottle)
+        center, _, _ = self.build_grasp_targets(observed_bottle) # 该方法返回(瓶子center, 预抓取位姿, 抓取位姿)，这里只取center
         acm = self.get_acm()
         errors = []
         for yaw_deg in self.approach_yaws:
@@ -1237,13 +1238,13 @@ class PiperVisionController:
                 np.deg2rad(yaw_deg), [0, 0, 1])[:3, :3] @ observed_bottle[:3, :3])
             tool[:3, 3] = [center[0], center[1],
                           self.table_surface_z(center[0], center[1]) + self.grasp_height]
-            grasp = tool @ np.linalg.inv(self.T_link6_tool)
-            pre_tool = tool.copy()
+            grasp = tool @ np.linalg.inv(self.T_link6_tool) # grasp 为抓取位姿（link6的位姿 而不是 夹爪的位姿）
+            pre_tool = tool.copy()                          # pre_tool 为预抓取位姿（也是link6的位姿）
             pre_tool[:3, 3] -= tool[:3, 2] * self.pregrasp_distance
             pre = pre_tool @ np.linalg.inv(self.T_link6_tool)
             try:
                 self.require_unchanged_scan()
-                self.arm.set_start_state_to_current_state()
+                self.arm.set_start_state_to_current_state() # 把 MoveIt 规划起点设为当前真实关节状态（虚拟设定，不驱动电机）
                 self.arm.set_pose_target(self.pose_from_matrix(pre), "link6")
                 pre_trajectory = self.unpack_plan(self.arm.plan())
                 self.validate_trajectory(pre_trajectory)
@@ -1257,7 +1258,7 @@ class PiperVisionController:
                                         (TARGET_BOTTLE_ID, "link8")], True)
                 self.arm.set_start_state(state)
                 approach, fraction = self.arm.compute_cartesian_path(
-                    [self.pose_from_matrix(grasp).pose], eef_step=0.003, avoid_collisions=True)
+                    [self.pose_from_matrix(grasp).pose], eef_step=0.003, avoid_collisions=True) # 返回直线路径的关节轨迹 和 完成比例
                 if not math.isfinite(fraction) or fraction < 0.999999 or not approach.joint_trajectory.points:
                     raise RuntimeError("接近直线不完整: %.6f" % fraction)
                 previous = positions
@@ -1369,16 +1370,16 @@ class PiperVisionController:
         # 维持显式指尖接触权限；touch_links负责附着物与指尖关系。
         self.grasp_confirmed = True
 
-        start_ee = self.current_ee_matrix()
+        start_ee = self.current_ee_matrix() # 获取末端位姿
         lift_target = start_ee.copy()
-        lift_target[2, 3] += self.lift_distance
+        lift_target[2, 3] += self.lift_distance # 改变第三行第四列的元素，即Z
         acm_before_lift = self.get_acm()
         self.set_contact_pairs([(TARGET_BOTTLE_ID, "table")], True)
         if (self.bottle_center_at_grasp[2] - self.bottle_height / 2 + self.lift_distance
                 <= self.table_model["bounds_max"][2] + self.lift_clearance):
             raise RuntimeError("lift_distance不足以让瓶底离开膨胀桌面")
         rospy.loginfo(">>> 携带瓶子沿base Z提升")
-        self.move_cartesian(lift_target)
+        self.move_cartesian(lift_target) # 调用直线规划函数提升瓶子
         self.confirm_grasp()
         actual_lift = self.current_ee_matrix()[2, 3] - start_ee[2, 3]
         bottle_bottom = (
@@ -1387,7 +1388,7 @@ class PiperVisionController:
         table_envelope_top = float(self.table_model["bounds_max"][2])
         if bottle_bottom <= table_envelope_top + self.lift_clearance:
             raise RuntimeError("瓶底尚未确认离开table包络")
-        self.apply_acm(acm_before_lift)
+        self.apply_acm(acm_before_lift) # 恢复提升前的碰撞矩阵，瓶子与桌面不再允许碰撞
         request = GetPlanningSceneRequest()
         request.components.components = (
             PlanningSceneComponents.ROBOT_STATE |
