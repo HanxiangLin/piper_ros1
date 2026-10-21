@@ -54,13 +54,37 @@ target_bottle_label: null
 
 # 默认（false）用当前停稳姿态识别，避免移动时尚未定位瓶子。
 move_to_photo_pose: true
-photo_joint_target: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-# 空列表表示提升后不再自动回零/转运。
-post_grasp_joint_target: []
+photo_joint_target: [0.0, 0.35, -0.47, 0.0, 0.65, 0.0]
+# 提升后自动转运。
+post_grasp_joint_target: [0.0, 0.35, -0.47, 0.0, 0.65, 0.0]
 
 # 可选：在同一个命名table上放置。另一个盒子/桌子需扩展支撑模型。
 enable_place: true
-# 启用时填写base_link下TCP的[x,y,z,roll,pitch,yaw]，m/rad。
+# card：检测桌面上的目标卡片，把瓶子直立放到卡片正前方。
+# fixed：使用下面place_tool_pose给出的固定TCP位姿。
+place_mode: card
+place_approach_height: 0.10
+
+# card模式参数。卡片立在桌面上（约与桌面60度、接近垂直），上面印有目标
+# 瓶子的高清照片，仍由YOLO检测该照片；检测结果直接使用深度表面点，
+# 不再与桌面求交。
+# 瓶子保持直立，在卡片检测点前方place_offset_from_card处松开夹爪，
+# 瓶子自由落到桌面。不需要精确卡片中心或桌面高度拟合。
+# toward_robot：卡片指向base_link原点的方向；fixed_yaw：使用place_front_yaw_deg。
+place_offset_from_card: 0.03
+# 立在桌面上的卡片透视角更大，放置识别允许更低的YOLO置信度。
+place_card_conf_thres: 0.35
+# 卡片照片的颜色标签；null表示沿用target_bottle_label。
+place_card_label: null
+# 松手时瓶底离桌面的最小间隙；松开后瓶子自由下落。
+place_release_clearance: 0.005
+# 检测框中心到实际卡片中心的base_link XY残差，经实物验证后填写。
+place_card_offset_xy: [0.0, 0.0]
+place_front_mode: toward_robot
+place_front_yaw_deg: 0.0
+# 可选：携带瓶子转向卡片前先移动到的关节观察位；空列表表示保持当前姿态。
+place_photo_joint_target: []
+
+# fixed模式参数：base_link下TCP的[x,y,z,roll,pitch,yaw]，m/rad。
 # 代码根据夹持时相对变换检查瓶底是否处于table平面±5mm内。
-# place_tool_pose: [MEASURE, MEASURE, MEASURE, MEASURE, MEASURE, MEASURE]
-# place_approach_height: MEASURE
+place_tool_pose: [0.51, 0.35, -0.47, 0.0, 0.65, 0.0]

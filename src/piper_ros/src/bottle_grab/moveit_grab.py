@@ -276,6 +276,13 @@ def draw_detection(img, x1, y1, x2, y2, color_label, conf, dist_m, xyz):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
 
 
+def draw_rejected(img, x1, y1, x2, y2, reason):
+    """Draw a rejected candidate so the debug window shows every YOLO box."""
+    cv2.rectangle(img, (x1, y1), (x2, y2), (150, 150, 150), 1)
+    cv2.putText(img, reason, (x1, max(int(y1) - 4, 12)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (150, 150, 150), 1)
+
+
 class PiperVisionController:
     def __init__(self):
         moveit_commander.roscpp_initialize(sys.argv)
@@ -285,6 +292,7 @@ class PiperVisionController:
         self.model = None
         self.current_ee_pose_mat = np.eye(4)
         self.grasp_confirmed = False
+        self.T_link6_bottle = None
         self._joint_lock = threading.Lock()
         self._joint_positions = None
         self._joint_feedback_time = None
@@ -384,15 +392,45 @@ class PiperVisionController:
         self.photo_joint_target = self._numeric_list(
             "~photo_joint_target",
             rospy.get_param("~photo_joint_target",
-                            [0, 0, 0, 0.0, 0, 0.0]), 6)
+                            [0.0, 0.35, -0.47, 0.0, 0.65, 0.0]), 6)
         self.post_grasp_joint_target = self._optional_numeric_list(
             "~post_grasp_joint_target", 6)
         self.enable_place = bool(rospy.get_param("~enable_place", True))
+        self.place_mode = str(rospy.get_param("~place_mode", "card"))
+        if self.place_mode not in ("card", "fixed"):
+            raise ValueError("~place_mode必须是card或fixed")
         if self.enable_place:
-            self.place_tool_pose = self._numeric_list(
-                "~place_tool_pose", rospy.get_param("~place_tool_pose"), 6)
             self.place_approach_height = self._finite_float(
                 "~place_approach_height", minimum=0.0, strict_min=True)
+        if self.enable_place and self.place_mode == "fixed":
+            self.place_tool_pose = self._numeric_list(
+                "~place_tool_pose", rospy.get_param("~place_tool_pose"), 6)
+        if self.enable_place and self.place_mode == "card":
+            # 松手点沿“卡片指向机器人”方向水平前移的距离。
+            self.place_offset_from_card = self._finite_float(
+                "~place_offset_from_card", 0.03, 0.0, 1.0, strict_min=True)
+            self.place_card_offset_xy = self._numeric_list(
+                "~place_card_offset_xy",
+                rospy.get_param("~place_card_offset_xy", [0.0, 0.0]), 2)
+            # 立在桌面上的卡片透视角更大，允许比抓取瓶子更低的YOLO置信度。
+            self.place_card_conf_thres = self._finite_float(
+                "~place_card_conf_thres", 0.35, 0.05, 0.95)
+            # 松手时瓶底离桌面的最小间隙；松开后瓶子自由下落。
+            self.place_release_clearance = self._finite_float(
+                "~place_release_clearance", 0.005, 0.0, 0.05)
+            self.place_card_label = rospy.get_param(
+                "~place_card_label", self.target_label)
+            if self.place_card_label not in (
+                    None, "bottle-y", "bottle-g", "bottle-b"):
+                raise ValueError("~place_card_label必须是bottle-y/g/b或null")
+            self.place_front_mode = str(
+                rospy.get_param("~place_front_mode", "toward_robot"))
+            if self.place_front_mode not in ("toward_robot", "fixed_yaw"):
+                raise ValueError("~place_front_mode必须是toward_robot或fixed_yaw")
+            self.place_front_yaw = self._finite_float(
+                "~place_front_yaw_deg", 0.0)
+            self.place_photo_joint_target = self._optional_numeric_list(
+                "~place_photo_joint_target", 6)
 
         self.bottle_center_offset_xy = self._numeric_list(
             "~bottle_center_offset_xy",
@@ -540,6 +578,51 @@ class PiperVisionController:
                 rospy.sleep(0.05)
         raise RuntimeError("5秒内没有完整、新鲜的真实/joint_states反馈")
 
+    def wait_for_arm_settled(self, timeout=2.0, epsilon=0.002, hold=0.25):
+        """Wait until every arm joint stops changing.
+
+        Opening or closing the gripper changes the load and makes the arm
+        rebound slightly (about 0.013 rad on joint5 in practice).  A motion
+        planned before that rebound finishes has a first point that no longer
+        matches the real robot state, and MoveIt's trajectory_execution_manager
+        rejects it with ``CONTROL_FAILED`` (allowed start tolerance 0.01 rad).
+        """
+        deadline = time.monotonic() + timeout
+        previous = self._fresh_joint_positions()
+        stable_since = time.monotonic()
+        while time.monotonic() < deadline:
+            rospy.sleep(0.02)
+            current = self._fresh_joint_positions()
+            if all(abs(current[name] - previous[name]) <= epsilon
+                   for name in ARM_JOINTS):
+                if time.monotonic() - stable_since >= hold:
+                    return
+            else:
+                stable_since = time.monotonic()
+            previous = current
+        raise RuntimeError("松手后机械臂未静止，拒绝立即撤离")
+
+    def check_trajectory_start(self, trajectory):
+        """Reject a trajectory whose first point disagrees with the real state.
+
+        This mirrors MoveIt's own start-point check (0.01 rad) but reports the
+        offending joint and deviation instead of only ``CONTROL_FAILED``.
+        """
+        if not trajectory.joint_trajectory.points:
+            raise RuntimeError("MoveIt返回空轨迹")
+        start = self._fresh_joint_positions()
+        names = list(trajectory.joint_trajectory.joint_names)
+        if any(name not in start for name in names):
+            raise RuntimeError("轨迹关节不在/joint_states中")
+        first = dict(zip(
+            names, trajectory.joint_trajectory.points[0].positions))
+        deviation = max(abs(first[name] - start[name]) for name in names)
+        if deviation > 0.010:
+            worst = max(names, key=lambda name: abs(first[name] - start[name]))
+            raise RuntimeError(
+                "轨迹起点与实机状态相差 %.4f rad(%s)，拒绝执行"
+                % (deviation, worst))
+
     def init_camera_and_detector(self):
         global rs
         try:
@@ -587,17 +670,24 @@ class PiperVisionController:
             self.current_ee_pose_mat[:3, :3])
         return result
 
-    def make_bottle_center_pose_in_base(self, pixel, intrinsics):
-        """Estimate the bottle axis center from a pixel and the scanned table.
+    def make_bottle_center_pose_in_base(self, pixel, intrinsics,
+                                        center_height=None):
+        """Estimate an object center from a pixel and the scanned table.
 
         The YOLO/depth point is the camera-facing surface.  For a standing
         bottle, the center lies on the ray through the detection pixel and at
-        bottle_height/2 above the fitted table plane.  Solving that
-        intersection removes the systematic ``front-surface`` offset without
-        changing the link6-to-tool/TCP transform.
+        bottle_height/2 above the fitted table plane.  For a flat card the
+        same ray is intersected with the table plane itself
+        (``center_height=0``).  Solving that intersection removes the
+        systematic ``front-surface`` offset without changing the
+        link6-to-tool/TCP transform.
         """
         if not hasattr(self, "table_model"):
-            raise RuntimeError("尚未加载桌面模型，无法反算瓶子中心")
+            raise RuntimeError("尚未加载桌面模型，无法反算物体中心")
+        if center_height is None:
+            center_height = self.bottle_height / 2.0
+        elif (not math.isfinite(center_height) or center_height < 0.0):
+            raise RuntimeError("物体中心离桌面的高度无效")
         px, py = pixel
         ray_cam = np.asarray(deproject(intrinsics, px, py, 1.0), dtype=float)
         ray_norm = np.linalg.norm(ray_cam)
@@ -614,20 +704,20 @@ class PiperVisionController:
                 or not math.isfinite(offset) or abs(normal[2]) < 0.98):
             raise RuntimeError("桌面模型不适合反算瓶子中心")
 
-        # table plane: n dot p + offset = 0.  The bottle center is
-        # bottle_height/2 above the table along base Z, hence
-        # n dot center + offset = n_z * bottle_height/2.
+        # table plane: n dot p + offset = 0.  The object center is
+        # center_height above the table along base Z, hence
+        # n dot center + offset = n_z * center_height.
         denominator = float(np.dot(normal, direction))
-        numerator = (normal[2] * self.bottle_height / 2.0
+        numerator = (normal[2] * center_height
                      - (float(np.dot(normal, origin)) + offset))
         if abs(denominator) < 1e-6:
-            raise RuntimeError("瓶子检测射线几乎平行于桌面")
+            raise RuntimeError("检测射线几乎平行于桌面")
         distance = numerator / denominator
         if not math.isfinite(distance) or distance <= 0.0:
-            raise RuntimeError("瓶子中心射线与桌面高度的交点无效")
+            raise RuntimeError("物体中心射线与桌面高度的交点无效")
         center = origin + distance * direction
         if not np.isfinite(center).all():
-            raise RuntimeError("反算得到的瓶子中心包含非有限值")
+            raise RuntimeError("反算得到的物体中心包含非有限值")
 
         result = np.eye(4)
         result[:3, 3] = center
@@ -635,15 +725,49 @@ class PiperVisionController:
             self.current_ee_pose_mat[:3, :3])
         return result
 
-    def get_bottle_pose(self, target_label=TARGET_BOTTLE_LABEL, max_frames=60):
-        """Detect one bottle and return its observed pose in base_link."""
+    def held_bottle_contains(self, point_base, margin=0.02):
+        """Return True when a base_link point lies inside the held bottle.
+
+        The bottle in the gripper is a known cylinder (``T_link6_bottle``),
+        so this filter does not depend on the table height or on the target
+        object's height.  A plain Z threshold cannot be used during placement:
+        a card standing on the table is several centimetres above the table
+        plane, exactly like the gripper bottle.
+        """
+        if self.T_link6_bottle is None:
+            return False
+        bottle = self.current_ee_pose_mat @ self.T_link6_bottle
+        center = bottle[:3, 3]
+        axis = normalize_vector(bottle[:3, 2])
+        if axis is None:
+            return False
+        offset = np.asarray(point_base, dtype=float) - center
+        along = float(np.clip(np.dot(offset, axis),
+                              -self.bottle_height / 2.0,
+                              self.bottle_height / 2.0))
+        radial = np.linalg.norm(offset - along * axis)
+        return radial <= self.bottle_radius + margin
+
+    def get_bottle_pose(self, target_label=TARGET_BOTTLE_LABEL, max_frames=60,
+                        center_height=None, description="目标瓶子",
+                        use_surface_point=False, conf_thres=None):
+        """Detect one bottle/card and return its observed pose in base_link.
+
+        ``center_height`` overrides the assumed height of the detected
+        object's center above the table.  ``None`` keeps the standing-bottle
+        assumption.  ``use_surface_point`` returns the measured depth point
+        itself instead of intersecting the pixel ray with the table plane;
+        use it for objects that stand above the table (for example a card
+        leaning on the table), where the table-ray center is tens of
+        centimetres off.
+        """
         self.current_ee_pose_mat = self.current_ee_matrix() # 获取当前link6的位姿
         reference_joints = self._fresh_joint_positions()    # 记录此时各关节的真实弧度作为基准
         # 丢弃缓冲中的旧画面；SDK时间域不同，不将其毫秒时间戳冒充ROS时间。
         for _ in range(5):
             self.pipeline.wait_for_frames(timeout_ms=5000)
-        label_text = target_label if target_label is not None else "任意颜色瓶子"
-        rospy.loginfo("正在检测目标瓶子: %s", label_text)
+        label_text = target_label if target_label is not None else "任意颜色目标"
+        rospy.loginfo("正在检测%s: %s", description, label_text)
         best_candidate = None
         best_score = -1.0
         last_annotated = None
@@ -671,7 +795,8 @@ class PiperVisionController:
             intrinsics = filtered_depth.profile.as_video_stream_profile().intrinsics
             results = self.model.predict(
                 source=color_image, imgsz=IMG_SIZE,
-                conf=CONF_THRES, verbose=False)
+                conf=CONF_THRES if conf_thres is None else conf_thres,
+                verbose=False)
 
             if results and results[0].boxes is not None:
                 boxes = results[0].boxes.xyxy.cpu().numpy().astype(int)
@@ -684,8 +809,12 @@ class PiperVisionController:
                     color_label = classify_bottle_color(
                         color_image, x1, y1, x2, y2)
                     if color_label is None:
+                        draw_rejected(annotated, x1, y1, x2, y2,
+                                      "color? %.2f" % confidence)
                         continue
                     if target_label is not None and color_label != target_label:
+                        draw_rejected(annotated, x1, y1, x2, y2,
+                                      "label=%s" % color_label)
                         continue
                     cx = int((x1 + x2) // 2)
                     cy = int((y1 + y2) // 2)
@@ -693,16 +822,30 @@ class PiperVisionController:
                         filtered_depth, raw_depth, x1, y1, x2, y2,
                         self.depth_scale)
                     if not DEPTH_MIN < distance < DEPTH_MAX:
+                        draw_rejected(annotated, x1, y1, x2, y2,
+                                      "depth=%.3f" % distance)
                         continue
                     xyz_cam = deproject(intrinsics, cx, cy, distance)
                     surface_pose = self.make_bottle_pose_in_base(xyz_cam)
-                    if self.estimate_bottle_center_from_table:
-                        # 用像素射线+桌面+瓶高求轴线中心，而不是把深度表面点
-                        # 的base_link X/Y直接当作瓶子中心。
+                    if use_surface_point:
+                        # 立着/斜靠的物体直接使用深度表面点，不能和桌面求交。
+                        T_base_bottle = surface_pose
+                    elif (self.estimate_bottle_center_from_table
+                            or center_height is not None):
+                        # 用像素射线+桌面求物体中心，而不是把深度表面点
+                        # 的base_link X/Y直接当作物体中心。
                         T_base_bottle = self.make_bottle_center_pose_in_base(
-                            (cx, cy), intrinsics)
+                            (cx, cy), intrinsics, center_height)
                     else:
                         T_base_bottle = surface_pose
+                    if self.held_bottle_contains(surface_pose[2, 3]):
+                        draw_rejected(annotated, x1, y1, x2, y2,
+                                      "held bottle")
+                        rospy.loginfo_throttle(
+                            2.0,
+                            "忽略夹爪中的瓶子候选: %s pixel=%s depth=%.3fm",
+                            color_label, (cx, cy), distance)
+                        continue
                     draw_detection(
                         annotated, x1, y1, x2, y2, color_label,
                         float(confidence), distance, xyz_cam)
@@ -737,14 +880,17 @@ class PiperVisionController:
                 rospy.loginfo(
                     "检测成功: %s conf=%.2f pixel=%s depth=%.4fm "
                     "surface_base=(%.4f, %.4f, %.4f) "
-                    "bottle_center_base=(%.4f, %.4f, %.4f) "
+                    "target_center_base=(%.4f, %.4f, %.4f) "
                     "correction=(%.4f, %.4f, %.4f)%s",
                     candidate["label"], candidate["conf"], candidate["center"],
                     candidate["dist_m"], surface[0], surface[1], surface[2],
                     position[0], position[1], position[2],
                     correction[0], correction[1], correction[2],
-                    " (table-ray center)" if self.estimate_bottle_center_from_table
-                    else " (depth surface fallback)")
+                    " (depth surface)" if use_surface_point
+                    else (" (table-ray center)"
+                          if (self.estimate_bottle_center_from_table
+                              or center_height is not None)
+                          else " (depth surface fallback)"))
                 return candidate["T_base_bottle"]
 
         if last_annotated is not None and self.show_detection_window:
@@ -753,7 +899,7 @@ class PiperVisionController:
                 cv2.waitKey(1)
             except cv2.error:
                 pass
-        rospy.logwarn("超时：未检测到目标瓶子: %s", label_text)
+        rospy.logwarn("超时：未检测到%s: %s", description, label_text)
         return None
 
     def frozen_scene_signature(self):
@@ -976,9 +1122,11 @@ class PiperVisionController:
         self._fresh_joint_positions()
         if self.grasp_confirmed:
             self.confirm_grasp()
+        self.check_trajectory_start(trajectory)
         if not self.arm.execute(trajectory, wait=True):
             raise RuntimeError("MoveIt/FollowJointTrajectory执行失败")
-        self.arm.stop()
+        # execute(wait=True)已在目标点结束；这里不再重复stop()，
+        # 避免取消已完成goal导致actionlib晚到状态回调报警。
         final = dict(zip(
             self.arm.get_active_joints(), self.arm.get_current_joint_values()))
         names = trajectory.joint_trajectory.joint_names
@@ -1045,14 +1193,25 @@ class PiperVisionController:
             self.arm.clear_pose_targets()
 
     def wait_object(self, name, known, attached, timeout=5.0):
+        """Wait until the object matches the requested scene state.
+
+        ``known`` or ``attached`` may be ``None`` when that part of the state
+        is irrelevant.  ``remove_attached_object`` puts the object back into
+        the world instead of deleting it, so its ``known`` state after a
+        release is version dependent and must not be asserted.
+        """
         deadline = time.monotonic() + timeout
+        is_known = is_attached = None
         while not rospy.is_shutdown() and time.monotonic() < deadline:
             is_known = name in self.scene.get_known_object_names()
             is_attached = bool(self.scene.get_attached_objects([name]))
-            if is_known == known and is_attached == attached:
+            if ((known is None or is_known == known)
+                    and (attached is None or is_attached == attached)):
                 return
             rospy.sleep(0.05)
-        raise RuntimeError("场景对象未同步: " + name)
+        raise RuntimeError(
+            "场景对象未同步: %s (known=%s attached=%s)"
+            % (name, is_known, is_attached))
 
     def table_surface_z(self, x, y):
         normal = np.asarray(self.table_model["plane_normal"], dtype=float)
@@ -1279,11 +1438,106 @@ class PiperVisionController:
                 self.arm.set_start_state_to_current_state()
         raise RuntimeError("没有有效的预抓取/直线接近候选: " + "; ".join(errors))
 
-    def execute_place(self):
-        if not self.enable_place:
-            return
-        if not self.grasp_confirmed:
-            raise RuntimeError("尚未确认抓住瓶子，拒绝放置")
+    def build_place_targets(self, observed_card):
+        """Compute pre-place/place link6 poses in front of the detected card.
+
+        The card stands on the table, so ``get_bottle_pose`` is called with
+        ``use_surface_point=True`` and its measured depth point is used
+        directly.  Placement is deliberately simple: keep the bottle upright,
+        move its center ``place_offset_from_card`` horizontally in front of
+        that point (towards the robot by default) at the card's detected
+        height, then open the gripper and let the bottle drop onto the table.
+        No precise card center or table-height fitting is needed.
+        """
+        if self.T_link6_bottle is None:
+            raise RuntimeError("尚未记录link6->瓶子变换，拒绝放置")
+        card_x = (float(observed_card[0, 3])
+                  + self.place_card_offset_xy[0])
+        card_y = (float(observed_card[1, 3])
+                  + self.place_card_offset_xy[1])
+        card_z = float(observed_card[2, 3])
+        if not np.isfinite([card_x, card_y, card_z]).all():
+            raise RuntimeError("卡片位置包含非有限值")
+
+        if self.place_front_mode == "toward_robot":
+            dx, dy = -card_x, -card_y
+        else:
+            yaw = math.radians(self.place_front_yaw)
+            dx, dy = math.cos(yaw), math.sin(yaw)
+        norm = math.hypot(dx, dy)
+        if norm < 1e-6:
+            raise RuntimeError("无法确定卡片正前方方向，请检查place_front参数")
+
+        bottle_x = card_x + self.place_offset_from_card * dx / norm
+        bottle_y = card_y + self.place_offset_from_card * dy / norm
+        table_z = self.table_surface_z(bottle_x, bottle_y)
+        # 松手高度取卡片检测点高度，但瓶底不允许低于桌面+间隙，
+        # 避免松手前把瓶子压进桌面。
+        release_center_z = max(
+            card_z, table_z + self.bottle_height / 2.0
+            + self.place_release_clearance)
+        bottle_center = np.array([bottle_x, bottle_y, release_center_z])
+        self.require_support_footprint(bottle_center, self.bottle_radius)
+
+        T_bottle_place = np.eye(4)
+        T_bottle_place[:3, 3] = bottle_center
+        place = T_bottle_place @ np.linalg.inv(self.T_link6_bottle)
+
+        pre = place.copy()
+        pre[2, 3] += self.place_approach_height
+        pre_bottom = (bottle_center[2] - self.bottle_height / 2.0
+                      + self.place_approach_height)
+        required_bottom = (
+            self.table_model["bounds_max"][2] + self.lift_clearance)
+        if pre_bottom <= required_bottom:
+            raise RuntimeError(
+                "预放置高度不足以离开膨胀table: 瓶底z=%.4f，需大于%.4f；"
+                "请增大place_approach_height至少%.4f"
+                % (pre_bottom, required_bottom,
+                   required_bottom - pre_bottom + 1e-4))
+        rospy.loginfo(
+            "放置目标: card=(%.4f, %.4f, %.4f) "
+            "bottle_center=(%.4f, %.4f, %.4f) 松手后下落=%.4fm",
+            card_x, card_y, card_z,
+            bottle_center[0], bottle_center[1], bottle_center[2],
+            bottle_center[2] - self.bottle_height / 2.0 - table_z)
+        return pre, place, bottle_center
+
+    def release_bottle_and_retract(self, pre_place):
+        """Open the gripper, detach the bottle, update the world, retract."""
+        bottle_actual = self.current_ee_matrix() @ self.T_link6_bottle
+        rospy.loginfo(">>> 张开夹爪")
+        self.command_gripper(self.opening_open, wait_for_target=True)
+        self.scene.remove_attached_object("link6", name=TARGET_BOTTLE_ID)
+        # detach后对象会回到world（是否known取决于MoveIt版本），
+        # 这里只确认它不再是附着对象，随后add_cylinder会重设位姿。
+        self.wait_object(TARGET_BOTTLE_ID, known=None, attached=False)
+        self.grasp_confirmed = False
+
+        # 松开后瓶子自由下落到桌面，世界模型按桌面高度更新，
+        # 避免在场景里留下一个悬空的圆柱。
+        bottle_actual[2, 3] = (
+            self.table_surface_z(bottle_actual[0, 3], bottle_actual[1, 3])
+            + self.bottle_height / 2.0)
+        self.scene.add_cylinder(
+            TARGET_BOTTLE_ID, self.pose_from_matrix(bottle_actual),
+            height=self.bottle_height, radius=self.bottle_radius)
+        self.wait_object(TARGET_BOTTLE_ID, known=True, attached=False)
+        self.set_contact_pairs(
+            [(TARGET_BOTTLE_ID, link) for link in
+             ("link6", "link7", "link8")], True)
+        # 松爪会改变负载并让关节回弹；必须等机械臂真正静止再算撤离轨迹。
+        rospy.loginfo(">>> 等待机械臂松手后静止")
+        self.wait_for_arm_settled()
+        rospy.loginfo(">>> 抬升撤离")
+        self.move_cartesian(pre_place)
+        self.apply_acm(self.acm_before_task)
+        self.set_contact_pairs(
+            [(TARGET_BOTTLE_ID, link) for link in
+             self.robot.get_link_names() + ["table", "<octomap>"]], False)
+        rospy.loginfo(">>> 放置完成，世界瓶子仍保留在场景中")
+
+    def execute_fixed_place(self):
         x, y, z, roll, pitch, yaw = self.place_tool_pose
         tool_place = tf_trans.euler_matrix(roll, pitch, yaw, axes="sxyz")
         tool_place[:3, 3] = [x, y, z]
@@ -1303,24 +1557,48 @@ class PiperVisionController:
             raise RuntimeError("预放置高度不足以离开膨胀table")
         rospy.loginfo(">>> MoveIt规划到预放置位")
         self.move_pose(pre)
+        acm_before_place = self.get_acm()
         self.set_contact_pairs([(TARGET_BOTTLE_ID, "table")], True)
-        self.move_cartesian(place)
-        self.command_gripper(self.opening_open, wait_for_target=True)
-        self.scene.remove_attached_object("link6", name=TARGET_BOTTLE_ID)
-        self.wait_object(TARGET_BOTTLE_ID, known=True, attached=False)
-        self.grasp_confirmed = False
-        # 释放后以实际末端位姿更新世界瓶子；默认无滑动，需要用实物验证。
-        bottle = self.current_ee_matrix() @ self.T_link6_bottle
-        self.scene.add_cylinder(TARGET_BOTTLE_ID, self.pose_from_matrix(bottle),
-                                height=self.bottle_height, radius=self.bottle_radius)
-        self.wait_object(TARGET_BOTTLE_ID, known=True, attached=False)
-        self.set_contact_pairs([(TARGET_BOTTLE_ID, "link7"),
-                                (TARGET_BOTTLE_ID, "link8")], True)
-        self.move_cartesian(pre)
-        self.apply_acm(self.acm_before_task)
-        self.set_contact_pairs([(TARGET_BOTTLE_ID, link) for link in
-                                self.robot.get_link_names() + ["table", "<octomap>"]], False)
-        rospy.loginfo(">>> 放置并退出完成，世界瓶子仍保留在场景中")
+        try:
+            self.move_cartesian(place)
+        finally:
+            self.apply_acm(acm_before_place)
+        self.release_bottle_and_retract(pre)
+
+    def execute_place(self):
+        if not self.enable_place:
+            return
+        if not self.grasp_confirmed:
+            raise RuntimeError("尚未确认抓住瓶子，拒绝放置")
+        if not self.scene.get_attached_objects([TARGET_BOTTLE_ID]):
+            raise RuntimeError("target_bottle未处于附着状态，拒绝放置")
+
+        if self.place_mode == "fixed":
+            self.execute_fixed_place()
+            return
+
+        if self.place_photo_joint_target is not None:
+            rospy.loginfo(">>> 携带瓶子移动到放置拍照位")
+            self.move_joints(self.place_photo_joint_target)
+        rospy.loginfo(">>> 检测目标卡片")
+        observed_card = self.get_bottle_pose(
+            self.place_card_label,
+            use_surface_point=True,
+            conf_thres=self.place_card_conf_thres,
+            description="目标卡片")
+        if observed_card is None:
+            raise RuntimeError("没有检测到目标卡片")
+        pre, place, _ = self.build_place_targets(observed_card)
+        rospy.loginfo(">>> MoveIt规划到预放置位")
+        self.move_pose(pre)
+        acm_before_place = self.get_acm()
+        self.set_contact_pairs([(TARGET_BOTTLE_ID, "table")], True)
+        try:
+            rospy.loginfo(">>> 碰撞检查下直线下降到放置位")
+            self.move_cartesian(place)
+        finally:
+            self.apply_acm(acm_before_place)
+        self.release_bottle_and_retract(pre)
 
     def execute_vision_grasp(self):
         rospy.loginfo(">>> 开始MoveIt视觉抓取任务")
