@@ -327,7 +327,11 @@ class PiperVisionController:
             "lift_table_margin",
             "bottle_height", "bottle_radius", "grasp_height_from_table",
             "pregrasp_distance", "lift_distance", "link6_tool_xyz",
-            "grasp_opening_min", "grasp_opening_max", "grasp_effort_min")
+            "grasp_opening_min", "grasp_opening_max", "grasp_effort_min",
+            "gripper_opening_open", "gripper_opening_close_command",
+            "gripper_effort", "gripper_tolerance", "gripper_feedback_timeout",
+            "gripper_settle_time", "planning_time", "velocity_scale",
+            "acceleration_scale", "cartesian_joint_step_limit")
         missing = ["~" + key for key in required if not rospy.has_param("~" + key)]
         if missing:
             raise ValueError("缺少实测任务参数: " + ", ".join(missing))
@@ -369,9 +373,9 @@ class PiperVisionController:
             "~approach_yaw_offsets_deg", candidate_yaws, len(candidate_yaws))
 
         self.opening_open = self._finite_float(
-            "~gripper_opening_open", 0.07, 0.0, 0.07)
+            "~gripper_opening_open", minimum=0.0, maximum=0.07)
         self.opening_close_command = self._finite_float(
-            "~gripper_opening_close_command", 0.0, 0.0, 0.07)
+            "~gripper_opening_close_command", minimum=0.0, maximum=0.07)
         self.grasp_opening_min = self._finite_float(
             "~grasp_opening_min", minimum=0.0, strict_min=True)
         self.grasp_opening_max = self._finite_float(
@@ -384,13 +388,15 @@ class PiperVisionController:
             "~grasp_effort_min", minimum=0.0, strict_min=True)
         self.grasp_check_service = str(rospy.get_param("~grasp_check_service", ""))
         self.gripper_effort = self._finite_float(
-            "~gripper_effort", 1.0, 0.5, 2.0)
+            "~gripper_effort", minimum=0.5, maximum=2.0)
         self.gripper_tolerance = self._finite_float(
-            "~gripper_tolerance", 0.004, 0.0, 0.02, strict_min=True)
+            "~gripper_tolerance", minimum=0.0, maximum=0.02,
+            strict_min=True)
         self.gripper_feedback_timeout = self._finite_float(
-            "~gripper_feedback_timeout", 4.0, 0.0, 20.0, strict_min=True)
+            "~gripper_feedback_timeout", minimum=0.0, maximum=20.0,
+            strict_min=True)
         self.gripper_settle_time = self._finite_float(
-            "~gripper_settle_time", 1.5, 0.0, 10.0)
+            "~gripper_settle_time", minimum=0.0, maximum=10.0)
 
         self.move_to_photo_pose = bool(rospy.get_param("~move_to_photo_pose", True))
         self.photo_joint_target = self._numeric_list(
@@ -404,24 +410,31 @@ class PiperVisionController:
         if self.place_mode not in ("card", "fixed"):
             raise ValueError("~place_mode必须是card或fixed")
         if self.enable_place:
+            if not rospy.has_param("~place_approach_height"):
+                raise ValueError("缺少放置参数: ~place_approach_height")
             self.place_approach_height = self._finite_float(
                 "~place_approach_height", minimum=0.0, strict_min=True)
         if self.enable_place and self.place_mode == "fixed":
             self.place_tool_pose = self._numeric_list(
                 "~place_tool_pose", rospy.get_param("~place_tool_pose"), 6)
         if self.enable_place and self.place_mode == "card":
+            for key in ("place_offset_from_card", "place_card_conf_thres",
+                        "place_release_clearance", "place_front_yaw_deg"):
+                if not rospy.has_param("~" + key):
+                    raise ValueError("缺少card放置参数: ~" + key)
             # 松手点沿“卡片指向机器人”方向水平前移的距离。
             self.place_offset_from_card = self._finite_float(
-                "~place_offset_from_card", 0.03, 0.0, 1.0, strict_min=True)
+                "~place_offset_from_card", minimum=0.0, maximum=1.0,
+                strict_min=True)
             self.place_card_offset_xy = self._numeric_list(
                 "~place_card_offset_xy",
                 rospy.get_param("~place_card_offset_xy", [0.0, 0.0]), 2)
             # 立在桌面上的卡片透视角更大，允许比抓取瓶子更低的YOLO置信度。
             self.place_card_conf_thres = self._finite_float(
-                "~place_card_conf_thres", 0.35, 0.05, 0.95)
+                "~place_card_conf_thres", minimum=0.05, maximum=0.95)
             # 松手时瓶底离桌面的最小间隙；松开后瓶子自由下落。
             self.place_release_clearance = self._finite_float(
-                "~place_release_clearance", 0.005, 0.0, 0.05)
+                "~place_release_clearance", minimum=0.0, maximum=0.05)
             self.place_card_label = rospy.get_param(
                 "~place_card_label", self.target_label)
             if self.place_card_label not in (
@@ -432,7 +445,7 @@ class PiperVisionController:
             if self.place_front_mode not in ("toward_robot", "fixed_yaw"):
                 raise ValueError("~place_front_mode必须是toward_robot或fixed_yaw")
             self.place_front_yaw = self._finite_float(
-                "~place_front_yaw_deg", 0.0)
+                "~place_front_yaw_deg")
             self.place_photo_joint_target = self._optional_numeric_list(
                 "~place_photo_joint_target", 6)
 
@@ -461,15 +474,16 @@ class PiperVisionController:
         self.arm.set_end_effector_link("link6")
         self.arm.set_planner_id(str(rospy.get_param("~planner_id", "RRTConnect")))
         self.arm.set_planning_time(self._finite_float(
-            "~planning_time", 10.0, 2.0, 30.0))
+            "~planning_time", minimum=2.0, maximum=30.0))
         attempts = int(rospy.get_param("~planning_attempts", 8))
         if not 1 <= attempts <= 30:
             raise ValueError("~planning_attempts必须在1～30内")
         self.arm.set_num_planning_attempts(attempts)
         self.velocity_scale = self._finite_float(
-            "~velocity_scale", 0.03, 0.0, 0.10, strict_min=True)
+            "~velocity_scale", minimum=0.0, maximum=0.10, strict_min=True)
         self.acceleration_scale = self._finite_float(
-            "~acceleration_scale", 0.03, 0.0, 0.10, strict_min=True)
+            "~acceleration_scale", minimum=0.0, maximum=0.10,
+            strict_min=True)
         self.arm.set_max_velocity_scaling_factor(self.velocity_scale)
         self.arm.set_max_acceleration_scaling_factor(self.acceleration_scale)
         self.arm.set_goal_position_tolerance(0.003)
@@ -1168,7 +1182,7 @@ class PiperVisionController:
             raise RuntimeError(
                 "直线路径受阻或不可达，完成比例 {:.6f}".format(fraction))
         limit = self._finite_float(
-            "~cartesian_joint_step_limit", 0.15, 0.0, 0.50,
+            "~cartesian_joint_step_limit", minimum=0.0, maximum=0.50,
             strict_min=True)
         previous = dict(zip(
             self.arm.get_active_joints(), self.arm.get_current_joint_values()))
@@ -1434,7 +1448,9 @@ class PiperVisionController:
                 if not math.isfinite(fraction) or fraction < 0.999999 or not approach.joint_trajectory.points:
                     raise RuntimeError("接近直线不完整: %.6f" % fraction)
                 previous = positions
-                limit = self._finite_float("~cartesian_joint_step_limit", 0.15, 0.0, 0.5, strict_min=True)
+                limit = self._finite_float(
+                    "~cartesian_joint_step_limit", minimum=0.0,
+                    maximum=0.50, strict_min=True)
                 for point in approach.joint_trajectory.points:
                     current = dict(zip(approach.joint_trajectory.joint_names, point.positions))
                     if any(abs(value - previous[name]) > limit for name, value in current.items()):

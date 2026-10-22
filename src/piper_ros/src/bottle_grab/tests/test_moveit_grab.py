@@ -48,6 +48,7 @@ class MoveItGrabTests(unittest.TestCase):
         controller.scene = MagicMock()
         controller.execute_motion = False
         controller.grasp_confirmed = False
+        controller.lift_table_margin = 0.005
         controller.require_unchanged_scan = MagicMock()
         controller._fresh_joint_positions = MagicMock(return_value={
             name: 0. for name in m.ARM_JOINTS})

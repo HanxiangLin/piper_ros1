@@ -40,6 +40,8 @@ grasp_effort_min: 0.30
 # 可接额外视觉/夹持传感器的Trigger服务：success=true表示确认抓住。
 # 未填写则依赖经过实物校验的开口+负载+稳定时间，仍不能证明无滑移。
 grasp_check_service: ""
+# 夹爪到位判定容差(m)。
+gripper_tolerance: 0.004
 gripper_feedback_timeout: 4.0
 gripper_settle_time: 1.5
 
