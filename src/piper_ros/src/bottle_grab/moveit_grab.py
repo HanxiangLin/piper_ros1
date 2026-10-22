@@ -324,6 +324,7 @@ class PiperVisionController:
         self.execute_motion = execute
         required = (
             "table_model", "support_edge_margin", "lift_clearance",
+            "lift_table_margin",
             "bottle_height", "bottle_radius", "grasp_height_from_table",
             "pregrasp_distance", "lift_distance", "link6_tool_xyz",
             "grasp_opening_min", "grasp_opening_max", "grasp_effort_min")
@@ -358,6 +359,9 @@ class PiperVisionController:
             "~pregrasp_distance", minimum=0.0, strict_min=True)
         self.lift_distance = self._finite_float(
             "~lift_distance", minimum=0.0, strict_min=True)
+        # 抬升时瓶底越过table碰撞盒顶部的最小余量（不是运输余量）。
+        self.lift_table_margin = self._finite_float(
+            "~lift_table_margin", minimum=0.0, maximum=0.05)
         candidate_yaws = rospy.get_param("~approach_yaw_offsets_deg", [0.0, 30.0, -30.0])
         if not isinstance(candidate_yaws, list) or not candidate_yaws or len(candidate_yaws) > 12:
             raise ValueError("~approach_yaw_offsets_deg需要1～12个方向")
@@ -1231,9 +1235,18 @@ class PiperVisionController:
         if center_xyz.shape != (3,) or not np.isfinite(center_xyz).all():
             raise ValueError("瓶子中心无效")
         self.require_support_footprint(center_xyz, self.bottle_radius)
-        if (center_xyz[2] - self.bottle_height / 2 + self.lift_distance
-                <= self.table_model["bounds_max"][2] + self.lift_clearance):
-            raise ValueError("lift_distance不足以让瓶底离开table包络；首次运动前修正参数")
+
+        bottom_at_grasp = center_xyz[2] - self.bottle_height / 2.0
+        envelope_top = self.table_model["bounds_max"][2]
+        if (bottom_at_grasp + self.lift_distance
+                <= envelope_top + self.lift_table_margin):
+            raise ValueError(
+                "lift_distance不足以让瓶底离开table碰撞盒: "
+                "瓶底z=%.4f 提升后z=%.4f 盒顶z=%.4f 需要>%.4f；"
+                "请增大lift_distance或检查机械臂垂直可达高度"
+                % (bottom_at_grasp, bottom_at_grasp + self.lift_distance,
+                   envelope_top, envelope_top + self.lift_table_margin))
+        
         if (self.scene.get_attached_objects([TARGET_BOTTLE_ID])
                 or TARGET_BOTTLE_ID in self.scene.get_known_object_names()):
             raise RuntimeError("已有target_bottle，请核对上次真实抓取状态后处理，拒绝覆盖")
@@ -1653,9 +1666,19 @@ class PiperVisionController:
         lift_target[2, 3] += self.lift_distance # 改变第三行第四列的元素，即Z
         acm_before_lift = self.get_acm()
         self.set_contact_pairs([(TARGET_BOTTLE_ID, "table")], True)
-        if (self.bottle_center_at_grasp[2] - self.bottle_height / 2 + self.lift_distance
-                <= self.table_model["bounds_max"][2] + self.lift_clearance):
-            raise RuntimeError("lift_distance不足以让瓶底离开膨胀桌面")
+        
+        if (self.bottle_center_at_grasp[2] - self.bottle_height / 2
+                + self.lift_distance
+                <= self.table_model["bounds_max"][2] + self.lift_table_margin):
+            raise RuntimeError(
+                "lift_distance不足以让瓶底离开table碰撞盒: "
+                "瓶底z=%.4f 提升后z=%.4f 盒顶z=%.4f 需要>%.4f"
+                % (self.bottle_center_at_grasp[2] - self.bottle_height / 2,
+                   self.bottle_center_at_grasp[2] - self.bottle_height / 2
+                   + self.lift_distance,
+                   self.table_model["bounds_max"][2],
+                   self.table_model["bounds_max"][2] + self.lift_table_margin))
+        
         rospy.loginfo(">>> 携带瓶子沿base Z提升")
         self.move_cartesian(lift_target) # 调用直线规划函数提升瓶子
         self.confirm_grasp()
@@ -1664,8 +1687,12 @@ class PiperVisionController:
             self.bottle_center_at_grasp[2]
             - self.bottle_height / 2.0 + actual_lift)
         table_envelope_top = float(self.table_model["bounds_max"][2])
-        if bottle_bottom <= table_envelope_top + self.lift_clearance:
-            raise RuntimeError("瓶底尚未确认离开table包络")
+
+        if bottle_bottom <= table_envelope_top + self.lift_table_margin:
+            raise RuntimeError(
+                "瓶底尚未离开table碰撞盒: 瓶底z=%.4f 盒顶z=%.4f 实际抬升=%.4f"
+                % (bottle_bottom, table_envelope_top, actual_lift))
+        
         self.apply_acm(acm_before_lift) # 恢复提升前的碰撞矩阵，瓶子与桌面不再允许碰撞
         request = GetPlanningSceneRequest()
         request.components.components = (

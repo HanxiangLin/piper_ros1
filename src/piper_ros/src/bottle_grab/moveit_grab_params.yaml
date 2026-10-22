@@ -23,8 +23,9 @@ estimate_bottle_center_from_table: true
 # 反算后仍存在的、经过实物验证的base_link X/Y残差；初始保持0。
 bottle_center_offset_xy: [0.0, 0.0]
 pregrasp_distance: 0.10
-lift_distance: 0.15
+lift_distance: 0.04         # 实测该姿态最大能上升约 4.4cm，留 4mm 余量（不同的建模场景不同）
 support_edge_margin: 0.02
+lift_table_margin: 0.005    # 抬升只需越过碰撞盒顶 5mm
 lift_clearance: 0.03
 
 # 完整夹爪开口(m)；joint7/joint8各为开口的一半。
@@ -47,16 +48,16 @@ acceleration_scale: 0.03
 planning_time: 10.0
 planning_attempts: 8
 cartesian_joint_step_limit: 0.15
-approach_yaw_offsets_deg: [0.0, 30.0, -30.0]
+approach_yaw_offsets_deg: [30.0, 0.0, -30.0]
 show_detection_window: true
 # null代表任意颜色，可选bottle-y、bottle-g、bottle-b。
 target_bottle_label: null
 
 # 默认（false）用当前停稳姿态识别，避免移动时尚未定位瓶子。
 move_to_photo_pose: true
-photo_joint_target: [0.0, 0.35, -0.47, 0.0, 0.65, 0.0]
+photo_joint_target: [0.0, 0.460, -1.064, 0.0, 0.927, 0.0]
 # 提升后自动转运。
-post_grasp_joint_target: [0.0, 0.35, -0.47, 0.0, 0.65, 0.0]
+post_grasp_joint_target: [0.0, 0.460, -1.064, 0.0, 0.927, 0.0]
 
 # 可选：在同一个命名table上放置。另一个盒子/桌子需扩展支撑模型。
 enable_place: true
