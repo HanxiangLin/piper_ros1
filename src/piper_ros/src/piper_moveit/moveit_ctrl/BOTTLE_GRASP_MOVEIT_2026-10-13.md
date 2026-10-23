@@ -1619,6 +1619,12 @@ read -r -p "瓶底离开包络后的提升余量(m): " PIPER_LIFT_CLEARANCE
 当前脚本使用MoveIt执行全部手臂运动，默认仅预览第一段；
 实际开爪、闭爪使用/gripper_srv，并在命令前检查joint7/joint8的完整扫掠。
 
+当前脚本已拆分为同目录下的可复用子模块，直接运行 `moveit_grab.py` 即可，无需额外安装或修改
+`PYTHONPATH`：`pose_utils.py`、`vision_utils.py`、`param_utils.py`、`camera.py`、
+`detector.py`、`hand_eye.py`、`joint_feedback.py`、`arm_controller.py`、
+`gripper_controller.py`、`scene_manager.py`、`grasp_task.py`、`place_task.py`。
+入口仍为 `moveit_grab.py`，参数文件和启动命令不变。
+
 ### 13.1 填写任务参数文件
 
 参数模板已创建：
@@ -1931,7 +1937,9 @@ test -f /home/hank/piper_ws/calibration/bottle_grasp_scan/scan_01/environment.ba
 
 ```text
 冻结场景、table模型和当前机器人状态检查通过
-YOLO与RealSense初始化完成
+RealSense初始化完成；depth scale=...
+正在加载YOLO瓶子检测模型: ...
+YOLO模型加载完成
 检测成功: ...
 抓取候选通过: 水平偏转...度
 仅规划模式：第一段轨迹已显示，未发送运动命令
