@@ -1,6 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Vision-guided grasp task orchestration."""
+"""Vision-guided grasp orchestration.
+
+The scan has already produced the frozen scene, the target pose and the list of
+obstacles, so this module only plans and executes:
+
+1. enumerate approach yaw candidates and reject the ones whose approach corridor
+   is already blocked by a non-target obstacle;
+2. plan the pre-grasp motion, then verify the straight approach from a virtual
+   trajectory end state (the robot has not moved yet);
+3. execute, close the gripper, confirm, attach, lift and hand over to the place
+   task.
+"""
+
+import math
 
 import numpy as np
 import rospy
@@ -8,96 +21,195 @@ import tf.transformations as tf_trans
 from moveit_msgs.msg import PlanningSceneComponents
 from moveit_msgs.srv import GetPlanningSceneRequest
 
-from pose_utils import pose_from_matrix
+from grasp_corridor import filter_by_corridor
+from joint_feedback import ARM_JOINTS
+from pose_utils import level_grasp_rotation_for_azimuth, pose_from_matrix
 from scene_manager import TARGET_BOTTLE_ID
 
 
 class GraspTask:
     """Build grasp targets, plan candidates and execute the vision grasp."""
 
+    # 候选代价：路径/接近段/腕部/限位余量的相对权重。腕部项故意单独拿出来，
+    # 避免选中"肩不动但 joint4/joint6 硬拧"的构型。
+    JOINT_WEIGHTS = np.array([1.0, 1.2, 1.2, 1.0, 1.0, 1.0])
+    PATH_WEIGHT = 1.0
+    APPROACH_WEIGHT = 2.0
+    WRIST_WEIGHT = 1.5
+    LIMIT_WEIGHT = 20.0
+    LIMIT_MARGIN = 0.10
+
     def __init__(self, config, state, arm, gripper, scene, joint_feedback,
-                 detector, camera, hand_eye, place_task):
+                 place_task):
         self.config = config
         self.state = state
         self.arm = arm
         self.gripper = gripper
         self.scene = scene
         self.joint_feedback = joint_feedback
-        self.detector = detector
-        self.camera = camera
-        self.hand_eye = hand_eye
         self.place_task = place_task
-
-    # ------------------------------------------------------------------
-    # Detection helper shared with the place task.
-    # ------------------------------------------------------------------
-    def get_bottle_pose(self, target_label=None, max_frames=60,
-                        center_height=None, description="目标瓶子",
-                        use_surface_point=False, conf_thres=None):
-        return self.detector.get_pose(
-            self.camera, self.arm, self.joint_feedback, self.state,
-            self.hand_eye, self.scene.table_model,
-            self.config.bottle_height, self.config.bottle_radius,
-            self.config.estimate_bottle_center_from_table,
-            self.config.show_detection_window,
-            target_label=target_label, max_frames=max_frames,
-            center_height=center_height, description=description,
-            use_surface_point=use_surface_point, conf_thres=conf_thres)
 
     # ------------------------------------------------------------------
     # Grasp target construction and candidate planning.
     # ------------------------------------------------------------------
-    def build_grasp_targets(self, observed_bottle):
+    def _grasp_point(self, observed_bottle):
+        """Return ``(grasp_pos, bottle_center)`` in base_link.
+
+        Only the observed translation is used: the approach azimuth is derived
+        from the base->bottle radial direction, not from the last scan
+        viewpoint's end-effector orientation.
+        """
         center_x = (observed_bottle[0, 3]
                     + self.config.bottle_center_offset_xy[0])
         center_y = (observed_bottle[1, 3]
                     + self.config.bottle_center_offset_xy[1])
         table_z = self.scene.table_surface_z(center_x, center_y)
+        grasp_pos = np.array([
+            center_x, center_y, table_z + self.config.grasp_height])
         center = np.array([
             center_x, center_y,
             table_z + self.config.bottle_height / 2.0])
-        self.scene.add_bottle(
-            center, self.config.bottle_height, self.config.bottle_radius,
-            self.config.lift_distance, self.config.lift_table_margin,
-            self.state)
+        return grasp_pos, center
 
-        T_base_tool_grasp = observed_bottle.copy()
-        T_base_tool_grasp[:3, 3] = [
-            center_x, center_y, table_z + self.config.grasp_height]
-        approach_axis = T_base_tool_grasp[:3, 2]
-        T_base_tool_pre = T_base_tool_grasp.copy()
-        T_base_tool_pre[:3, 3] -= approach_axis * self.config.pregrasp_distance
+    def build_grasp_targets(self, observed_bottle):
+        """Return ``(bottle_center, pre, grasp)`` at the radial yaw (0°)."""
+        grasp_pos, center = self._grasp_point(observed_bottle)
+        azimuth = math.atan2(grasp_pos[1], grasp_pos[0])
+        tool = np.eye(4)
+        tool[:3, :3] = level_grasp_rotation_for_azimuth(azimuth)
+        tool[:3, 3] = grasp_pos
+        approach_axis = tool[:3, 2]
+        pre_tool = tool.copy()
+        pre_tool[:3, 3] -= approach_axis * self.config.pregrasp_distance
         inverse_tool = np.linalg.inv(self.config.T_link6_tool)
         return (
             center,
-            T_base_tool_pre @ inverse_tool,
-            T_base_tool_grasp @ inverse_tool,
+            pre_tool @ inverse_tool,
+            tool @ inverse_tool,
         )
 
-    def plan_grasp_candidate(self, observed_bottle):
-        """Plan pregrasp + complete approach before moving, using virtual start state."""
-        center, _, _ = self.build_grasp_targets(observed_bottle)
-        acm = self.scene.get_acm()
-        errors = []
+    def _candidates(self, observed_bottle):
+        """Return radial-referenced yaw candidates with a free corridor.
+
+        ``approach_yaw_offsets_deg`` is now relative to the base->bottle
+        azimuth: 0 degrees means a radial approach; positive values turn the
+        approach direction counter-clockwise around base Z.
+        """
+        grasp_pos, _ = self._grasp_point(observed_bottle)
+        azimuth = math.atan2(grasp_pos[1], grasp_pos[0])
+        nominal_rotation = level_grasp_rotation_for_azimuth(azimuth)
+        inverse_tool = np.linalg.inv(self.config.T_link6_tool)
+        candidates = []
         for yaw_deg in self.config.approach_yaws:
-            tool = observed_bottle.copy()
-            tool[:3, :3] = (tf_trans.rotation_matrix(
+            rotation = (tf_trans.rotation_matrix(
                 np.deg2rad(yaw_deg), [0, 0, 1])[:3, :3]
-                @ observed_bottle[:3, :3])
-            tool[:3, 3] = [
-                center[0], center[1],
-                self.scene.table_surface_z(center[0], center[1])
-                + self.config.grasp_height]
-            grasp = tool @ np.linalg.inv(self.config.T_link6_tool)
+                @ nominal_rotation)
+            tool = np.eye(4)
+            tool[:3, :3] = rotation
+            tool[:3, 3] = grasp_pos
             pre_tool = tool.copy()
-            pre_tool[:3, 3] -= tool[:3, 2] * self.config.pregrasp_distance
-            pre = pre_tool @ np.linalg.inv(self.config.T_link6_tool)
+            pre_tool[:3, 3] -= rotation[:, 2] * self.config.pregrasp_distance
+            grasp = tool @ inverse_tool
+            pre = pre_tool @ inverse_tool
+            candidates.append({
+                "label": yaw_deg,
+                "start": pre[:3, 3].copy(),
+                "end": grasp[:3, 3].copy(),
+                "pre": pre,
+                "grasp": grasp,
+            })
+
+        scan_result = getattr(self.state, "scan_result", None)
+        if not scan_result:
+            return candidates
+        accepted, rejected = filter_by_corridor(
+            candidates, scan_result["obstacles"],
+            self.config.scan_corridor_radius,
+            self.config.scan_corridor_samples)
+        for item in rejected:
+            rospy.logwarn(
+                "接近方向%.1f度被%s挡住: 净距%.3fm < %.3fm",
+                item["label"], item["blocking"], item["clearance"],
+                self.config.scan_corridor_radius)
+        if not accepted:
+            raise RuntimeError(
+                "没有可行的接近走廊: " + "; ".join(
+                    "%.1f度被%s挡住(%.3fm)"
+                    % (item["label"], item["blocking"], item["clearance"])
+                    for item in rejected))
+        return accepted
+
+    def _weighted_joint_distance(self, first, second):
+        return float(np.sum(self.JOINT_WEIGHTS * np.abs(first - second)))
+
+    def _trajectory_motion(self, trajectory):
+        """Return ``(weighted path length, final joint vector)``."""
+        names = list(trajectory.joint_trajectory.joint_names)
+        index = {name: number for number, name in enumerate(names)}
+        if any(name not in index for name in ARM_JOINTS):
+            raise RuntimeError("候选轨迹缺少六轴关节")
+        previous = None
+        path = 0.0
+        for point in trajectory.joint_trajectory.points:
+            current = np.array([
+                point.positions[index[name]] for name in ARM_JOINTS])
+            if previous is not None:
+                path += self._weighted_joint_distance(previous, current)
+            previous = current
+        if previous is None:
+            raise RuntimeError("候选轨迹为空")
+        return path, previous
+
+    def _candidate_cost(self, pre_trajectory, approach):
+        """Score one valid candidate; lower is better.
+
+        The hard gates (collision, corridor, straight-line completion) are
+        already applied by the caller.  This cost only decides *which* valid
+        candidate to execute.
+        """
+        pre_path, q_pre = self._trajectory_motion(pre_trajectory)
+        approach_path, _ = self._trajectory_motion(approach)
+        wrist = abs(float(q_pre[3])) + abs(float(q_pre[5]))
+        margins = self.arm.joint_limit_margins(q_pre)
+        limit = sum(max(0.0, self.LIMIT_MARGIN - float(margin)) ** 2
+                    for margin in margins)
+        cost = (self.PATH_WEIGHT * pre_path
+                + self.APPROACH_WEIGHT * approach_path
+                + self.WRIST_WEIGHT * wrist
+                + self.LIMIT_WEIGHT * limit)
+        return float(cost), {
+            "path": pre_path,
+            "approach": approach_path,
+            "wrist": wrist,
+            "limit": limit,
+            "q_pre": q_pre,
+        }
+
+    def plan_grasp_candidate(self, observed_bottle, candidates=None):
+        """Plan every candidate and keep the lowest-cost valid one.
+
+        Planning all candidates makes the choice explicit instead of returning
+        whichever yaw happened to be first in the list.  The cost prefers a
+        short joint-space path, little joint change during the straight
+        approach, a centred wrist and healthy joint-limit margins.  Collision
+        and straight-line completeness remain hard gates.
+        """
+        if candidates is None:
+            candidates = self._candidates(observed_bottle)
+        acm = self.scene.get_acm()
+        failures = []
+        results = []
+        for candidate in candidates:
+            pre = candidate["pre"]
+            grasp = candidate["grasp"]
+            stage = "pregrasp"
+            approach = None
+            fraction = float("nan")
             try:
-                self.scene.require_unchanged_scan()
                 self.arm.arm.set_start_state_to_current_state()
-                self.arm.arm.set_pose_target(pose_from_matrix(pre), "link6")
-                pre_trajectory = self.arm.unpack_plan(self.arm.arm.plan())
-                self.arm.validate_trajectory(pre_trajectory)
+                # 用当前状态作为IK初值、按关节目标规划，避免OMPL随机
+                # 采到远端肘/腕分支；内部已校验，失败会回退pose目标。
+                pre_trajectory = self.arm.plan_pose_nearest(pre)
                 # 在预抓取轨迹的虚拟终点检查最后一段；机器人仍停在原处。
                 state = self.arm.robot.get_current_state()
                 positions = dict(zip(
@@ -111,6 +223,7 @@ class GraspTask:
                     [(TARGET_BOTTLE_ID, "link7"),
                      (TARGET_BOTTLE_ID, "link8")], True)
                 self.arm.arm.set_start_state(state)
+                stage = "approach"
                 approach, fraction = self.arm.arm.compute_cartesian_path(
                     [pose_from_matrix(grasp).pose], eef_step=0.003,
                     avoid_collisions=True)
@@ -128,48 +241,91 @@ class GraspTask:
                         raise RuntimeError("候选接近段关节跳变")
                     previous = current
                 self.arm.validate_trajectory(approach)
-                rospy.loginfo("抓取候选通过: 水平偏转%.1f度", yaw_deg)
-                return pre_trajectory, grasp
+                cost, details = self._candidate_cost(
+                    pre_trajectory, approach)
+                results.append((cost, candidate, pre_trajectory, details))
+                rospy.loginfo(
+                    "候选通过: 偏转%+.1f度 代价%.3f "
+                    "(路径%.2f 接近%.2f 腕部%.2f 限位%.4f) 净距%.3fm",
+                    candidate["label"], cost, details["path"],
+                    details["approach"], details["wrist"], details["limit"],
+                    candidate.get("clearance", float("inf")))
             except RuntimeError as error:
-                errors.append("%.1f度: %s" % (yaw_deg, error))
+                # 直线段诊断必须趁虚拟起点和放宽的ACM还在时立即做；
+                # 预抓取IK诊断很慢（14组初值），推迟到“所有候选都失败”
+                # 再跑，避免某个候选失败就卡住整个候选评估。
+                reason = None
+                if stage != "pregrasp":
+                    reason = self.arm.diagnose_cartesian(grasp, fraction)
+                failures.append({
+                    "label": candidate["label"],
+                    "stage": stage,
+                    "pre": pre,
+                    "error": error,
+                    "reason": reason,
+                })
             finally:
                 self.scene.apply_acm(acm)
                 self.arm.arm.clear_pose_targets()
                 self.arm.arm.set_start_state_to_current_state()
-        raise RuntimeError(
-            "没有有效的预抓取/直线接近候选: " + "; ".join(errors))
+        if not results:
+            errors = []
+            for failure in failures:
+                reason = failure["reason"]
+                if failure["stage"] == "pregrasp":
+                    reason = self.arm.diagnose_pose(
+                        failure["pre"],
+                        "预抓取位%.1f度" % failure["label"])
+                errors.append("%+.1f度: %s%s" % (
+                    failure["label"], failure["error"],
+                    "" if reason is None else "；%s" % reason))
+            raise RuntimeError(
+                "没有有效的预抓取/直线接近候选: " + "; ".join(errors))
+        if failures:
+            rospy.logwarn(
+                "未通过的候选: %s",
+                "; ".join("%+.1f度: %s" % (item["label"], item["error"])
+                          for item in failures))
+
+        results.sort(key=lambda item: item[0])
+        cost, candidate, pre_trajectory, details = results[0]
+        rospy.loginfo(
+            "选择候选: 水平偏转%+.1f度 代价%.3f "
+            "(路径%.2f 接近%.2f 腕部%.2f 限位%.4f) 净距%.3fm；"
+            "有效候选%d/%d",
+            candidate["label"], cost, details["path"],
+            details["approach"], details["wrist"], details["limit"],
+            candidate.get("clearance", float("inf")),
+            len(results), len(candidates))
+        if len(results) > 1:
+            rospy.loginfo(
+                "其余有效候选代价: %s",
+                ", ".join("%+.1f度=%.3f" % (item[1]["label"], item[0])
+                          for item in results[1:]))
+        return pre_trajectory, candidate["grasp"]
 
     # ------------------------------------------------------------------
-    # Full vision grasp workflow.
+    # Full grasp workflow.
     # ------------------------------------------------------------------
     def execute_vision_grasp(self):
         rospy.loginfo(">>> 开始MoveIt视觉抓取任务")
         self.joint_feedback.wait_for_joint_feedback()
-        self.scene.require_scan_scene()
+        observed = getattr(self.state, "T_base_bottle", None)
+        if observed is None:
+            raise RuntimeError("扫描没有提供目标瓶位姿，拒绝抓取")
         if self.scene.scene.get_attached_objects([TARGET_BOTTLE_ID]):
             raise RuntimeError("已有附着瓶子，不能当作空载重启任务")
-        self.camera.start()
-        self.detector.load()
+        if not self.state.created_bottle:
+            raise RuntimeError("目标瓶尚未加入规划场景，拒绝抓取")
 
-        if self.config.move_to_photo_pose:
-            rospy.logwarn(
-                "目标瓶子尚未建模；仅在已确认该路径安全时移动到拍照位")
-            self.arm.move_joints(self.config.photo_joint_target)
-        else:
-            rospy.loginfo("使用当前安全停稳姿态拍照；未自动移动到旧脚本拍照位")
-
-        observed = self.get_bottle_pose(self.config.target_label)
-        if observed is None:
-            raise RuntimeError("没有检测到目标瓶子")
-        rospy.loginfo(">>> 张开夹爪")
-        if self.config.execute_motion:
-            self.gripper.command(self.config.opening_open, wait_for_target=True)
-        elif abs(self.gripper.current_opening()
-                 - self.config.opening_open) > self.config.gripper_tolerance:
-            raise RuntimeError(
-                "仅规划不会张爪；先将实际夹爪置于配置张开量，再预览路径")
         rospy.loginfo(">>> 检查多个预抓取/接近方向")
-        pre_trajectory, T_grasp = self.plan_grasp_candidate(observed)
+        candidates = self._candidates(observed)
+        pre_trajectory, T_grasp = self.plan_grasp_candidate(observed, candidates)
+        if getattr(self.config, "dry_run", False):
+            rospy.logwarn(
+                ">>> dry_run: 预抓取与直线接近校验通过，"
+                "跳过抓取执行（预抓取轨迹未执行）")
+            return
         rospy.loginfo(">>> 执行预抓取轨迹")
         self.arm.finish_motion(pre_trajectory)
 
@@ -192,6 +348,8 @@ class GraspTask:
             TARGET_BOTTLE_ID, link="link6",
             touch_links=["link7", "link8"])
         self.scene.wait_object(TARGET_BOTTLE_ID, known=False, attached=True)
+        # 附着改变了世界列表，这是本程序主动做的变更，重新冻结签名。
+        self.scene.refresh_signature()
         # 维持显式指尖接触权限；touch_links负责附着物与指尖关系。
         self.state.grasp_confirmed = True
 
@@ -240,11 +398,16 @@ class GraspTask:
         self.scene.validate_robot_state(
             self.scene.get_scene(request).scene.robot_state)
 
-        if self.config.post_grasp_joint_target is not None:
-            rospy.loginfo(">>> 携带瓶子规划到抓取后关节目标")
-            self.arm.move_joints(self.config.post_grasp_joint_target)
+        if self.config.enable_place:
+            # 先回零位再放置：抓取后的手腕是"低姿横伸"构型，直接横移到放置位
+            # 会让整条手臂挤在桌面高度，直线下降很容易被卡片/桌面截断。
+            rospy.loginfo(">>> 抓取完成，先回零位再放置")
+            self.arm.move_joints(self.config.home_joint_target)
         self.place_task.execute_place()
-        if self.state.grasp_confirmed:
+        if self.config.enable_place:
+            rospy.loginfo(">>> 放置完成，回到零位")
+            self.arm.move_joints(self.config.home_joint_target)
+        elif self.state.grasp_confirmed:
             rospy.logwarn(
-                "抓取提升完成；瓶子仍作为AttachedCollisionObject附着，"
-                "未自动放置或回零")
+                "抓取提升完成；瓶子仍作为AttachedCollisionObject附着在link6，"
+                "未放置也未回零")

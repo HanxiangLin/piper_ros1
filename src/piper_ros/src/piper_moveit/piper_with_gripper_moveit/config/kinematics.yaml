@@ -1,7 +1,9 @@
 arm:
   kinematics_solver: kdl_kinematics_plugin/KDLKinematicsPlugin
   kinematics_solver_search_resolution: 0.005
-  kinematics_solver_timeout: 0.005
+  # 5ms 只够 KDL 做一两次牛顿迭代；预抓取/直线段经常因此误报无解。
+  # 50ms 仍远小于规划超时，但给随机重启留出了尝试机会。
+  kinematics_solver_timeout: 0.05
 gripper:
   kinematics_solver: kdl_kinematics_plugin/KDLKinematicsPlugin
   kinematics_solver_search_resolution: 0.005

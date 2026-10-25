@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""MoveIt bottle-grasp entry point.
+"""MoveIt bottle-grasp entry point (live scan).
 
-This module only assembles the submodules (camera, detector, hand-eye,
-joint feedback, scene/ACM, arm, gripper, grasp/place tasks) and runs the
-complete task.  Reusable components live in the sibling modules:
+The program no longer consumes an offline table model or a hand-driven static
+OctoMap session.  On start it clears the previous snapshot, raises the arm to
+``scan_start_joint_target``, scans the workspace from three viewpoints, fits the
+table, separates the target bottle from every other obstacle, freezes the
+snapshot and then grasps and places.
 
-- pose_utils / vision_utils / param_utils     (pure helpers)
-- camera / detector / hand_eye                (SDK / calibration)
+This module only assembles the submodules; the reusable pieces live in the
+sibling modules:
+
+- pose_utils / vision_utils / param_utils          (pure helpers)
+- cloud_fusion / table_fit / obstacle_model /
+  grasp_corridor                                   (pure scan geometry)
+- camera / detector / hand_eye                     (SDK / calibration)
 - joint_feedback / arm_controller / gripper_controller / scene_manager
-- grasp_task / place_task                     (business orchestration)
+- scan_task / grasp_task / place_task              (business orchestration)
 """
 
 import sys
@@ -20,8 +27,12 @@ import cv2
 import numpy as np
 import rospy
 import tf.transformations as tf_trans
-import tf2_geometry_msgs  # noqa: F401 - registers PoseStamped TF conversion
 import tf2_ros
+try:  # 只用于 PoseStamped 的 TF 转换；缺少 PyKDL 时不影响主流程
+    import tf2_geometry_msgs  # noqa: F401 - registers PoseStamped TF conversion
+except ImportError:  # pragma: no cover - depends on the interpreter
+    print("警告: 未安装 tf2_geometry_msgs/PyKDL；"
+          "若末端位姿不在base_link，TF转换会失败", file=sys.stderr)
 import moveit_commander
 from moveit_msgs.msg import DisplayTrajectory
 from moveit_msgs.srv import (
@@ -31,27 +42,21 @@ from moveit_msgs.srv import (
 )
 from piper_msgs.srv import Gripper
 
-from arm_controller import ArmController, PlanningOnlyStop  # noqa: F401
-from camera import (  # noqa: F401
+from arm_controller import ArmController
+from camera import (
     COLOR_HEIGHT,
     COLOR_WIDTH,
     DEPTH_HEIGHT,
     DEPTH_WIDTH,
     FPS,
     RealSenseCamera,
-    apply_filters,
-    build_filters,
 )
-from detector import CONF_THRES, IMG_SIZE, BottleDetector  # noqa: F401
+from detector import BottleDetector
 from grasp_task import GraspTask
 from gripper_controller import GripperController
 from hand_eye import HandEyeCalibration
-from joint_feedback import (  # noqa: F401
-    ARM_JOINTS,
-    FINGER_JOINTS,
-    JointFeedback,
-)
-from param_utils import finite_float, numeric_list, optional_numeric_list
+from joint_feedback import ARM_JOINTS, FINGER_JOINTS, JointFeedback  # noqa: F401
+from param_utils import finite_float, numeric_list
 from place_task import PlaceTask
 from pose_utils import (  # noqa: F401
     build_level_grasp_rotation,
@@ -63,7 +68,8 @@ from pose_utils import (  # noqa: F401
     quaternion_matrix,
     validate_transform,
 )
-from scene_manager import TARGET_BOTTLE_ID, SceneManager
+from scan_task import ScanTask
+from scene_manager import SceneManager
 from vision_utils import (  # noqa: F401
     COLOR_DEFS,
     COLOR_RATIO_THRES,
@@ -85,6 +91,8 @@ DEFAULT_MODEL_PATH = str(Path(__file__).resolve().with_name("bottle.pt"))
 DEFAULT_CALIBRATION_PATH = str(
     Path(__file__).resolve().parents[4]
     / "calibration/eye_in_hand_d435i/session_02/result.json")
+DEFAULT_ARTIFACT_ROOT = str(
+    Path(__file__).resolve().parents[4] / "calibration/bottle_grasp_scan")
 
 # None 表示抓取任意检测到的瓶子；也可以改成 "bottle-y"、"bottle-g"、"bottle-b"
 TARGET_BOTTLE_LABEL = None
@@ -106,13 +114,19 @@ class PiperVisionController:
             current_ee_pose_mat=np.eye(4),
             grasp_confirmed=False,
             T_link6_bottle=None,
+            T_base_bottle=None,
             bottle_center_at_grasp=None,
             created_bottle=False,
             gripper_service_sent=False,
+            scan_result=None,
+            card_model=None,
         )
         self.arm_controller = None
         self.joint_feedback = None
         self.camera = None
+        self.scan_task = None
+        self.grasp_task = None
+        self.place_task = None
 
         # 可选YAML与命令行私有参数合并，命令行优先；便于直接python运行。
         params_file = rospy.get_param("~params_file", "")
@@ -129,26 +143,23 @@ class PiperVisionController:
                     continue
                 if not rospy.has_param("~" + key):
                     rospy.set_param("~" + key, value)
-        execute = rospy.get_param("~execute", False)
-        if not isinstance(execute, bool):
-            raise ValueError("~execute必须为true或false")
-        cfg.execute_motion = execute
+
         required = (
-            "table_model", "support_edge_margin", "lift_clearance",
-            "lift_table_margin",
+            "support_edge_margin", "lift_clearance",
             "bottle_height", "bottle_radius", "grasp_height_from_table",
-            "pregrasp_distance", "lift_distance", "link6_tool_xyz",
+            "pregrasp_distance", "lift_distance", "lift_table_margin",
+            "link6_tool_xyz",
             "grasp_opening_min", "grasp_opening_max", "grasp_effort_min",
             "gripper_opening_open", "gripper_opening_close_command",
             "gripper_effort", "gripper_tolerance", "gripper_feedback_timeout",
             "gripper_settle_time", "planning_time", "velocity_scale",
-            "acceleration_scale", "cartesian_joint_step_limit")
+            "acceleration_scale", "cartesian_joint_step_limit",
+            "scan_start_joint_target")
         missing = ["~" + key for key in required if not rospy.has_param("~" + key)]
         if missing:
             raise ValueError("缺少实测任务参数: " + ", ".join(missing))
 
         cfg.model_path = str(rospy.get_param("~model_path", DEFAULT_MODEL_PATH))
-        cfg.table_model_path = str(rospy.get_param("~table_model"))
         calibration_path = rospy.get_param(
             "~hand_eye_calibration", DEFAULT_CALIBRATION_PATH)
         cfg.target_label = rospy.get_param(
@@ -178,7 +189,8 @@ class PiperVisionController:
             "~lift_table_margin", minimum=0.0, maximum=0.05)
 
         candidate_yaws = rospy.get_param(
-            "~approach_yaw_offsets_deg", [0.0, 30.0, -30.0])
+            "~approach_yaw_offsets_deg",
+            [0.0, 15.0, -15.0, 30.0, -30.0])
         if not isinstance(candidate_yaws, list) or not candidate_yaws or len(candidate_yaws) > 12:
             raise ValueError("~approach_yaw_offsets_deg需要1～12个方向")
         cfg.approach_yaws = numeric_list(
@@ -210,17 +222,145 @@ class PiperVisionController:
         cfg.gripper_settle_time = finite_float(
             "~gripper_settle_time", minimum=0.0, maximum=10.0)
 
-        cfg.move_to_photo_pose = bool(rospy.get_param("~move_to_photo_pose", True))
-        cfg.photo_joint_target = numeric_list(
-            "~photo_joint_target",
-            rospy.get_param("~photo_joint_target",
-                            [0.0, 0.35, -0.47, 0.0, 0.65, 0.0]), 6)
-        cfg.post_grasp_joint_target = optional_numeric_list(
-            "~post_grasp_joint_target", 6)
+        # ---------------- 扫描参数 ----------------
+        cfg.scan_mode = str(rospy.get_param("~scan_mode", "semantic"))
+        if cfg.scan_mode not in ("semantic", "both"):
+            raise ValueError("~scan_mode必须是semantic或both")
+        cfg.scan_cloud_topic = str(rospy.get_param(
+            "~scan_cloud_topic", "/piper/static_scan/points"))
+        cfg.scan_start_joint_target = numeric_list(
+            "~scan_start_joint_target",
+            rospy.get_param("~scan_start_joint_target"), 6)
+        offsets = rospy.get_param(
+            "~scan_joint1_offsets", [0.0, 0.357, -0.357])
+        if not isinstance(offsets, list) or not 1 <= len(offsets) <= 6:
+            raise ValueError("~scan_joint1_offsets需要1～6个数")
+        cfg.scan_joint1_offsets = numeric_list(
+            "~scan_joint1_offsets", offsets, len(offsets))
+        if any(abs(value) > 0.9 for value in cfg.scan_joint1_offsets):
+            raise ValueError("~scan_joint1_offsets单次偏移不能超过0.9rad")
+        cfg.scan_settle_time = finite_float(
+            "~scan_settle_time", 1.0, minimum=0.0, maximum=5.0)
+        cfg.scan_frames_per_view = int(rospy.get_param(
+            "~scan_frames_per_view", 4))
+        if not 1 <= cfg.scan_frames_per_view <= 12:
+            raise ValueError("~scan_frames_per_view必须在1～12内")
+        cfg.scan_frame_interval = finite_float(
+            "~scan_frame_interval", 0.15, minimum=0.0, maximum=1.0)
+        cfg.scan_min_frame_votes = int(rospy.get_param(
+            "~scan_min_frame_votes", 2))
+        if not 1 <= cfg.scan_min_frame_votes <= cfg.scan_frames_per_view:
+            raise ValueError("~scan_min_frame_votes必须在1～帧数内")
+        cfg.scan_min_views = int(rospy.get_param("~scan_min_views", 1))
+        if not 1 <= cfg.scan_min_views <= len(cfg.scan_joint1_offsets):
+            raise ValueError("~scan_min_views不得超过视点数")
+        cfg.scan_voxel_m = finite_float(
+            "~scan_voxel_m", 0.006, minimum=0.0, maximum=0.05, strict_min=True)
+        cfg.scan_cluster_voxel_m = finite_float(
+            "~scan_cluster_voxel_m", 0.012, minimum=0.0, maximum=0.1,
+            strict_min=True)
+        cfg.scan_min_points = int(rospy.get_param("~scan_min_points", 500))
+        if cfg.scan_min_points < 50:
+            raise ValueError("~scan_min_points至少为50")
+        cfg.scan_min_cluster_points = int(rospy.get_param(
+            "~scan_min_cluster_points", 40))
+        if cfg.scan_min_cluster_points < 10:
+            raise ValueError("~scan_min_cluster_points至少为10")
+        cfg.scan_stride = int(rospy.get_param("~scan_stride", 2))
+        if not 1 <= cfg.scan_stride <= 8:
+            raise ValueError("~scan_stride必须在1～8内")
+        cfg.scan_min_depth = finite_float(
+            "~scan_min_depth", 0.25, minimum=0.05, maximum=1.0)
+        cfg.scan_max_range = finite_float(
+            "~scan_max_range", 2.0, minimum=0.3, maximum=8.0)
+        cfg.scan_roi_min = numeric_list(
+            "~scan_roi_min", rospy.get_param(
+                "~scan_roi_min", [0.15, -0.45, 0.10]), 3)
+        cfg.scan_roi_max = numeric_list(
+            "~scan_roi_max", rospy.get_param(
+                "~scan_roi_max", [0.80, 0.45, 0.75]), 3)
+        if np.any(np.asarray(cfg.scan_roi_max)
+                  <= np.asarray(cfg.scan_roi_min)):
+            raise ValueError("~scan_roi_max必须逐轴大于~scan_roi_min")
+        if not cfg.scan_roi_min[2] < cfg.scan_roi_max[2]:
+            raise ValueError("~scan_roi 高度范围无效")
+        cfg.scan_detect_frames = int(rospy.get_param("~scan_detect_frames", 8))
+        if not 1 <= cfg.scan_detect_frames <= 60:
+            raise ValueError("~scan_detect_frames必须在1～60内")
+        cfg.scan_table_clearance = finite_float(
+            "~scan_table_clearance", 0.015, minimum=0.0, maximum=0.05)
+        cfg.scan_min_obstacle_height = finite_float(
+            "~scan_min_obstacle_height", 0.02, minimum=0.0, maximum=0.20)
+        cfg.scan_card_carve_margin = finite_float(
+            "~scan_card_carve_margin", 0.02, minimum=0.0, maximum=0.10)
+        cfg.scan_footprint_margin = finite_float(
+            "~scan_footprint_margin", 0.10, minimum=0.0, maximum=0.3)
+        cfg.scan_plane_threshold = finite_float(
+            "~scan_table_plane_threshold", 0.006, minimum=0.0,
+            maximum=0.05, strict_min=True)
+        cfg.scan_table_voxel = finite_float(
+            "~scan_table_voxel", 0.008, minimum=0.0, maximum=0.05,
+            strict_min=True)
+        cfg.scan_table_max_tilt = finite_float(
+            "~scan_table_max_tilt_deg", 3.0, minimum=0.0, maximum=10.0,
+            strict_min=True)
+        cfg.scan_table_min_inliers = int(rospy.get_param(
+            "~scan_table_min_inliers", 300))
+        cfg.scan_table_min_ratio = finite_float(
+            "~scan_table_min_ratio", 0.25, minimum=0.0, maximum=1.0,
+            strict_min=True)
+        cfg.scan_table_iterations = int(rospy.get_param(
+            "~scan_table_iterations", 200))
+        cfg.scan_table_edge_padding = finite_float(
+            "~scan_table_edge_padding", 0.03, minimum=0.0, maximum=0.2)
+        cfg.scan_table_support_depth = finite_float(
+            "~scan_table_support_depth", 0.02, minimum=0.0, maximum=0.2)
+        cfg.scan_table_mask_padding = finite_float(
+            "~scan_table_mask_padding", 0.02, minimum=0.0, maximum=0.2)
+        cfg.scan_card_planarity_m = finite_float(
+            "~scan_card_planarity_m", 0.012, minimum=0.0, maximum=0.05,
+            strict_min=True)
+        cfg.scan_card_min_extent = finite_float(
+            "~scan_card_min_extent", 0.10, minimum=0.0, maximum=1.0,
+            strict_min=True)
+        cfg.scan_card_max_thickness = finite_float(
+            "~scan_card_max_thickness", 0.03, minimum=0.0, maximum=0.2,
+            strict_min=True)
+        cfg.scan_cylinder_radius_tol = finite_float(
+            "~scan_cylinder_radius_tol", 0.6, minimum=0.0, maximum=1.0,
+            strict_min=True)
+        cfg.scan_cylinder_height_tol = finite_float(
+            "~scan_cylinder_height_tol", 0.5, minimum=0.0, maximum=1.0,
+            strict_min=True)
+        cfg.scan_non_target_cylinder = bool(rospy.get_param(
+            "~scan_non_target_cylinder", True))
+        cfg.scan_obstacle_padding = finite_float(
+            "~scan_obstacle_padding", 0.01, minimum=0.0, maximum=0.1)
+        # 卡片是薄板，用更小的外扩量，避免碰撞盒明显大于实物。
+        cfg.scan_card_padding = finite_float(
+            "~scan_card_padding", 0.005, minimum=0.0, maximum=0.05)
+        # 卡片附近的薄板视为卡片支架，不加入障碍集（只有侧视点才看得到）。
+        cfg.scan_stand_max_distance = finite_float(
+            "~scan_stand_max_distance", 0.25, minimum=0.0, maximum=0.6)
+        cfg.scan_stand_max_thickness = finite_float(
+            "~scan_stand_max_thickness", 0.03, minimum=0.0, maximum=0.10)
+        cfg.scan_corridor_radius = finite_float(
+            "~scan_corridor_radius", 0.06, minimum=0.0, maximum=0.3)
+        cfg.scan_corridor_samples = int(rospy.get_param(
+            "~scan_corridor_samples", 24))
+        if cfg.scan_corridor_samples < 2:
+            raise ValueError("~scan_corridor_samples至少为2")
+        cfg.scan_artifact_root = str(rospy.get_param(
+            "~scan_artifact_root", DEFAULT_ARTIFACT_ROOT))
+
+        # ---------------- 放置参数 ----------------
         cfg.enable_place = bool(rospy.get_param("~enable_place", True))
         cfg.place_mode = str(rospy.get_param("~place_mode", "card"))
         if cfg.place_mode not in ("card", "fixed"):
             raise ValueError("~place_mode必须是card或fixed")
+        cfg.home_joint_target = numeric_list(
+            "~home_joint_target", rospy.get_param(
+                "~home_joint_target", [0.0] * 6), 6)
         if cfg.enable_place:
             if not rospy.has_param("~place_approach_height"):
                 raise ValueError("缺少放置参数: ~place_approach_height")
@@ -230,44 +370,41 @@ class PiperVisionController:
             cfg.place_tool_pose = numeric_list(
                 "~place_tool_pose", rospy.get_param("~place_tool_pose"), 6)
         if cfg.enable_place and cfg.place_mode == "card":
-            for key in ("place_offset_from_card", "place_card_conf_thres",
-                        "place_release_clearance", "place_front_yaw_deg"):
+            for key in ("place_offset_from_card", "place_release_clearance"):
                 if not rospy.has_param("~" + key):
                     raise ValueError("缺少card放置参数: ~" + key)
-            # 松手点沿“卡片指向机器人”方向水平前移的距离。
+            # 松手点沿卡片正面法向前移的距离；必须大于瓶半径+卡厚+余量。
             cfg.place_offset_from_card = finite_float(
                 "~place_offset_from_card", minimum=0.0, maximum=1.0,
                 strict_min=True)
             cfg.place_card_offset_xy = numeric_list(
                 "~place_card_offset_xy",
                 rospy.get_param("~place_card_offset_xy", [0.0, 0.0]), 2)
-            # 立在桌面上的卡片透视角更大，允许比抓取瓶子更低的YOLO置信度。
-            cfg.place_card_conf_thres = finite_float(
-                "~place_card_conf_thres", minimum=0.05, maximum=0.95)
+            cfg.place_card_clearance = finite_float(
+                "~place_card_clearance", 0.015, minimum=0.0, maximum=0.1)
             # 松手时瓶底离桌面的最小间隙；松开后瓶子自由下落。
             cfg.place_release_clearance = finite_float(
                 "~place_release_clearance", minimum=0.0, maximum=0.05)
-            cfg.place_card_label = rospy.get_param(
-                "~place_card_label", cfg.target_label)
-            if cfg.place_card_label not in (
-                    None, "bottle-y", "bottle-g", "bottle-b"):
-                raise ValueError("~place_card_label必须是bottle-y/g/b或null")
             cfg.place_front_mode = str(
-                rospy.get_param("~place_front_mode", "toward_robot"))
-            if cfg.place_front_mode not in ("toward_robot", "fixed_yaw"):
-                raise ValueError("~place_front_mode必须是toward_robot或fixed_yaw")
-            cfg.place_front_yaw = finite_float("~place_front_yaw_deg")
-            cfg.place_photo_joint_target = optional_numeric_list(
-                "~place_photo_joint_target", 6)
+                rospy.get_param("~place_front_mode", "card_normal"))
+            if cfg.place_front_mode not in (
+                    "card_normal", "toward_robot", "fixed_yaw"):
+                raise ValueError(
+                    "~place_front_mode必须是card_normal/toward_robot/fixed_yaw")
+            cfg.place_front_yaw = finite_float(
+                "~place_front_yaw_deg", 0.0, minimum=-180.0, maximum=180.0)
+            place_yaws = rospy.get_param(
+                "~place_yaw_offsets_deg",
+                [0.0, 15.0, -15.0, 30.0, -30.0, 45.0, -45.0])
+            if (not isinstance(place_yaws, list) or not place_yaws
+                    or len(place_yaws) > 12):
+                raise ValueError("~place_yaw_offsets_deg需要1～12个方向")
+            cfg.place_yaws = numeric_list(
+                "~place_yaw_offsets_deg", place_yaws, len(place_yaws))
 
         cfg.bottle_center_offset_xy = numeric_list(
             "~bottle_center_offset_xy",
             rospy.get_param("~bottle_center_offset_xy", [0.0, 0.0]), 2)
-        # 深度百分位通常落在瓶子朝向相机的一侧表面；不能把该表面点
-        # 直接当成瓶子的轴线中心。默认根据检测像素射线、已扫描桌面平面
-        # 和瓶高反算瓶子中心，避免用TCP参数掩盖视觉几何误差。
-        cfg.estimate_bottle_center_from_table = bool(
-            rospy.get_param("~estimate_bottle_center_from_table", True))
         link6_tool_xyz = numeric_list(
             "~link6_tool_xyz",
             rospy.get_param("~link6_tool_xyz"), 3)
@@ -277,6 +414,8 @@ class PiperVisionController:
         cfg.T_link6_tool = tf_trans.euler_matrix(*tool_rpy, axes="sxyz")
         cfg.T_link6_tool[:3, 3] = link6_tool_xyz
 
+        # true时只规划并校验预抓取/直线接近，跳过抓取执行；扫描阶段仍会运动。
+        cfg.dry_run = bool(rospy.get_param("~dry_run", False))
         cfg.planner_id = str(rospy.get_param("~planner_id", "RRTConnect"))
         cfg.planning_time = finite_float(
             "~planning_time", minimum=2.0, maximum=30.0)
@@ -318,7 +457,7 @@ class PiperVisionController:
         self.joint_feedback = JointFeedback()
         self.joint_feedback.subscribe()
         for name in ("/get_planning_scene", "/apply_planning_scene",
-                     "/check_state_validity"):
+                     "/check_state_validity", "/compute_ik", "/gripper_srv"):
             rospy.wait_for_service(name, timeout=10.0)
         self.get_scene = rospy.ServiceProxy(
             "/get_planning_scene", GetPlanningScene)
@@ -326,55 +465,46 @@ class PiperVisionController:
             "/apply_planning_scene", ApplyPlanningScene)
         self.check_validity = rospy.ServiceProxy(
             "/check_state_validity", GetStateValidity)
-        gripper_service = None
-        if cfg.execute_motion:
-            rospy.wait_for_service("/gripper_srv", timeout=5.0)
-            gripper_service = rospy.ServiceProxy("/gripper_srv", Gripper)
+        gripper_service = rospy.ServiceProxy("/gripper_srv", Gripper)
 
         self.scene_manager = SceneManager(
             self.get_scene, self.apply_scene, self.check_validity,
-            self.robot, self.tf_buffer, cfg.table_model_path,
-            self.planning_scene,
-            support_edge_margin=cfg.support_edge_margin)
+            self.robot, self.tf_buffer, self.planning_scene,
+            support_edge_margin=cfg.support_edge_margin,
+            voxel_size=cfg.scan_voxel_m)
         self.gripper = GripperController(
             self.joint_feedback, self.scene_manager, gripper_service,
-            cfg.execute_motion, self.state, cfg.gripper_effort,
+            self.state, cfg.gripper_effort,
             cfg.gripper_tolerance, cfg.gripper_feedback_timeout,
             cfg.gripper_settle_time, cfg.grasp_opening_min,
             cfg.grasp_opening_max, cfg.grasp_effort_min,
             cfg.grasp_check_service)
         self.arm_controller = ArmController(
             move_group, self.robot, self.scene_manager, self.joint_feedback,
-            self.display_pub, cfg.execute_motion, self.state,
+            self.display_pub, self.state,
             self.gripper.confirm, cfg.velocity_scale, cfg.acceleration_scale,
             cfg.cartesian_joint_step_limit)
         self.hand_eye = HandEyeCalibration(calibration_path)
         self.camera = RealSenseCamera(
             COLOR_WIDTH, COLOR_HEIGHT, DEPTH_WIDTH, DEPTH_HEIGHT, FPS)
         self.detector = BottleDetector(cfg.model_path)
+        self.scan_task = ScanTask(
+            cfg, self.state, self.arm_controller, self.gripper,
+            self.scene_manager, self.joint_feedback, self.camera,
+            self.hand_eye, self.detector)
         self.grasp_task = GraspTask(
             cfg, self.state, self.arm_controller, self.gripper,
-            self.scene_manager, self.joint_feedback, self.detector,
-            self.camera, self.hand_eye, place_task=None)
+            self.scene_manager, self.joint_feedback, place_task=None)
         self.place_task = PlaceTask(
             cfg, self.state, self.arm_controller, self.gripper,
-            self.scene_manager, self.joint_feedback,
-            self.grasp_task.get_bottle_pose)
+            self.scene_manager, self.joint_feedback)
         self.grasp_task.place_task = self.place_task
 
     def run(self):
-        try:
-            self.grasp_task.execute_vision_grasp()
-        except PlanningOnlyStop as error:
-            rospy.logwarn("%s", error)
-            # 仅回收本次预览临时创建的世界瓶子，实机失败不进入这条路径。
-            if self.state.created_bottle and not self.state.gripper_service_sent:
-                self.scene_manager.scene.remove_world_object(TARGET_BOTTLE_ID)
-                self.scene_manager.wait_object(
-                    TARGET_BOTTLE_ID, known=False, attached=False)
-                self.scene_manager.apply_acm(
-                    self.scene_manager.acm_before_task)
-                self.state.created_bottle = False
+        self.camera.start()
+        self.detector.load()
+        self.scan_task.execute()
+        self.grasp_task.execute_vision_grasp()
 
     def close(self):
         if self.arm_controller is not None:

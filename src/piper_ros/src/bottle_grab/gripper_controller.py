@@ -12,7 +12,6 @@ from moveit_msgs.msg import PlanningSceneComponents
 from moveit_msgs.srv import GetPlanningSceneRequest
 from std_srvs.srv import Trigger
 
-from arm_controller import PlanningOnlyStop
 from joint_feedback import FINGER_JOINTS
 
 
@@ -20,14 +19,13 @@ class GripperController:
     """Commands the gripper and confirms grasp by opening + load feedback."""
 
     def __init__(self, joint_feedback, scene_manager, gripper_service,
-                 execute_motion, state, gripper_effort, gripper_tolerance,
+                 state, gripper_effort, gripper_tolerance,
                  gripper_feedback_timeout, gripper_settle_time,
                  grasp_opening_min, grasp_opening_max, grasp_effort_min,
                  grasp_check_service):
         self.joint_feedback = joint_feedback
         self.scene_manager = scene_manager
         self.gripper_service = gripper_service
-        self.execute_motion = execute_motion
         self.state = state
         self.gripper_effort = gripper_effort
         self.gripper_tolerance = gripper_tolerance
@@ -66,14 +64,14 @@ class GripperController:
             state.joint_state.position = positions
             self.scene_manager.validate_robot_state(state)
 
-    def command(self, opening, wait_for_target=True):
-        if not self.execute_motion:
-            raise PlanningOnlyStop("仅规划模式不发送夹爪命令")
+    def command(self, opening, wait_for_target=True, guarded=True):
         if not 0.0 <= opening <= 0.07:
             raise ValueError("夹爪开口越界")
-        self.scene_manager.require_unchanged_scan()
+        if guarded:
+            self.scene_manager.require_unchanged()
         self.validate_sweep(opening)
-        self.scene_manager.require_unchanged_scan()
+        if guarded:
+            self.scene_manager.require_unchanged()
         result = self.gripper_service(
             gripper_angle=opening,
             gripper_effort=self.gripper_effort,

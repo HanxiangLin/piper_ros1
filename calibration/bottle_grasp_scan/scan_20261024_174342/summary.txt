@@ -1,0 +1,4 @@
+桌面平面 z=0.1090 范围 x[0.251,0.829] y[-0.457,0.439]
+目标瓶 center=(0.4618, -0.1054, 0.1862) 实测半径=n/a 实测高=n/a 颜色=None
+障碍物 2 个: scan_obstacle_0(unknown,box,302点), scan_obstacle_card(card,box,1213点)
+卡片: center=(0.507,0.149,0.212) 21x16cm 厚6mm

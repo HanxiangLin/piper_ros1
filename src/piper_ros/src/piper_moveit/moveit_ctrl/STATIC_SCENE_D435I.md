@@ -1,5 +1,12 @@
 # D435i eye-in-hand 静态预扫描与 MoveIt OctoMap
 
+> 说明（对应 `bottle_grab` 的实时扫描版本）：`bottle_grab/moveit_grab.py` 已经不再依赖本文的
+> 手工静态扫描。抓取程序启动后会自己清场、抬臂、三视点扫描并冻结语义场景
+> （桌面 + 目标瓶 + 障碍），不再需要 `table_model.json`，也不再需要手工 `start/stop` 扫描门。
+> 本文保留给“只用 RViz/MoveIt 做规划验证”以及旧流程复现使用；两者不要同时启用。
+> 实时扫描的操作说明见
+> [`bottle_grab/LIVE_SCAN_GRASP.md`](../../bottle_grab/LIVE_SCAN_GRASP.md)。
+
 本流程在手眼标定独立验证通过、`camera_extrinsics.launch` 已生成后使用。它不会自动控制机械臂，
 不会持续实时避障。操作者明确开启扫描时，RealSense 点云才进入 MoveIt；明确停止后，
 MoveIt 内部 OctoMap 保持冻结，供后续 OMPL 规划做碰撞检查。

@@ -6,6 +6,8 @@ No ROS hardware or MoveIt dependency.  Only numpy and ``tf.transformations``
 are used, so these functions can be imported from any script or test.
 """
 
+import math
+
 import numpy as np
 import tf.transformations as tf_trans
 from geometry_msgs.msg import PoseStamped
@@ -81,6 +83,22 @@ def build_level_grasp_rotation(reference_R=None):
 
     R_base_grasp = np.column_stack((grasp_x, grasp_y, grasp_z))
     return R_base_grasp
+
+
+def level_grasp_rotation_for_azimuth(azimuth_rad):
+    """水平抓取姿态：X 轴朝下，Z 轴（接近方向）指向给定方位角。
+
+    ``azimuth_rad`` 是 base_link 中从原点指向抓取点的水平方位角。与
+    :func:`build_level_grasp_rotation` 不同，这里的接近方向由瓶子方位决定，
+    不再继承扫描结束时的末端姿态，因此 ``0°`` 就是正对瓶子的径向接近。
+    """
+    grasp_x = np.array([0.0, 0.0, -1.0])
+    grasp_z = np.array([
+        math.cos(float(azimuth_rad)), math.sin(float(azimuth_rad)), 0.0])
+    grasp_z /= np.linalg.norm(grasp_z)
+    grasp_y = np.cross(grasp_z, grasp_x)
+    grasp_y /= np.linalg.norm(grasp_y)
+    return np.column_stack((grasp_x, grasp_y, grasp_z))
 
 
 def validate_transform(matrix, name):

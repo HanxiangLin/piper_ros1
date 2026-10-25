@@ -236,3 +236,115 @@ class BottleDetector:
                 pass
         rospy.logwarn("超时：未检测到%s: %s", description, label_text)
         return None
+
+    def detect_scene(self, camera, arm_controller, joint_feedback, state,
+                     hand_eye, table_model, bottle_height, bottle_radius,
+                     show_detection_window, target_label=None, max_frames=20,
+                     conf_thres=None):
+        """Return every YOLO candidate at the current stationary pose.
+
+        Unlike :meth:`get_pose` this keeps *all* objects instead of the single
+        best one, because the scan needs to know about the printed card and any
+        other obstacle as well as the target bottle.  Candidates are
+        de-duplicated across frames by their base_link surface point.
+        """
+        current_ee_pose_mat = arm_controller.current_ee_matrix()
+        state.current_ee_pose_mat = current_ee_pose_mat
+        reference_joints = joint_feedback._fresh_joint_positions()
+        for _ in range(5):
+            camera.frames(timeout_ms=5000)
+
+        found = {}
+        last_annotated = None
+        for frame_index in range(max_frames):
+            if rospy.is_shutdown():
+                break
+            try:
+                frames = camera.frames(timeout_ms=5000)
+            except RuntimeError as error:
+                rospy.logwarn("RealSense等待图像超时: %s", error)
+                continue
+            measured = joint_feedback._fresh_joint_positions()
+            if any(abs(measured[name] - reference_joints[name]) > 0.01
+                   for name in ARM_JOINTS):
+                raise RuntimeError("视觉采集期间机械臂发生移动；停止并重新扫描")
+            aligned = camera.align.process(frames)
+            raw_depth = aligned.get_depth_frame()
+            color_frame = aligned.get_color_frame()
+            if not raw_depth or not color_frame:
+                continue
+            filtered_depth = apply_filters(
+                raw_depth, camera.filters).as_depth_frame()
+            color_image = np.asanyarray(color_frame.get_data())
+            annotated = color_image.copy()
+            intrinsics = filtered_depth.profile.as_video_stream_profile().intrinsics
+            candidates = self.detect(
+                color_image, filtered_depth, raw_depth, camera.depth_scale,
+                conf_thres)
+            for candidate in candidates:
+                x1, y1, x2, y2 = candidate["box"]
+                label = candidate["label"]
+                confidence = candidate["conf"]
+                if label is None:
+                    draw_rejected(annotated, x1, y1, x2, y2,
+                                  "color? %.2f" % confidence)
+                    continue
+                if target_label is not None and label != target_label:
+                    draw_rejected(annotated, x1, y1, x2, y2,
+                                  "label=%s" % label)
+                    continue
+                cx, cy = candidate["center"]
+                distance = candidate["dist_m"]
+                if not DEPTH_MIN < distance < DEPTH_MAX:
+                    draw_rejected(annotated, x1, y1, x2, y2,
+                                  "depth=%.3f" % distance)
+                    continue
+                xyz_cam = deproject(intrinsics, cx, cy, distance)
+                surface_pose = hand_eye.make_bottle_pose_in_base(
+                    xyz_cam, current_ee_pose_mat)
+                if hand_eye.held_bottle_contains(
+                        surface_pose[2, 3], current_ee_pose_mat,
+                        state.T_link6_bottle, bottle_height, bottle_radius):
+                    continue
+                try:
+                    center_pose = hand_eye.make_bottle_center_pose_in_base(
+                        (cx, cy), intrinsics, current_ee_pose_mat, table_model,
+                        bottle_height=bottle_height)
+                except RuntimeError:
+                    center_pose = None
+                draw_detection(annotated, x1, y1, x2, y2, label, confidence,
+                               distance, xyz_cam)
+                key = (label, round(float(surface_pose[0, 3]), 2),
+                       round(float(surface_pose[1, 3]), 2))
+                previous = found.get(key)
+                if previous is None or confidence > previous["conf"]:
+                    found[key] = {
+                        "label": label,
+                        "conf": float(confidence),
+                        "box": (x1, y1, x2, y2),
+                        "center": (cx, cy),
+                        "dist_m": float(distance),
+                        "surface_base": surface_pose[:3, 3].copy(),
+                        "center_base": (None if center_pose is None
+                                        else center_pose[:3, 3].copy()),
+                    }
+            last_annotated = annotated
+            if show_detection_window:
+                try:
+                    cv2.imshow("Bottle Detection For Scan", annotated)
+                    cv2.waitKey(1)
+                except cv2.error:
+                    pass
+            if frame_index >= 4 and found:
+                break
+
+        if last_annotated is not None and show_detection_window:
+            try:
+                cv2.imshow("Bottle Detection For Scan", last_annotated)
+                cv2.waitKey(1)
+            except cv2.error:
+                pass
+        result = sorted(found.values(), key=lambda item: -item["conf"])
+        rospy.loginfo("扫描检测到 %d 个物体: %s", len(result), ", ".join(
+            "%s(%.2f)" % (item["label"], item["conf"]) for item in result))
+        return result

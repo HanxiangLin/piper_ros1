@@ -1,0 +1,151 @@
+# 用法：python moveit_grab.py _params_file:=/完整路径/moveit_grab_params.yaml
+# 命令行私有参数优先于此文件。MEASURE必须替换为实测数字/路径。
+#
+# 本版本不再需要离线 table_model.json，也不再需要手工开关静态扫描门：
+# 程序启动后会清空上一次的场景，抬起机械臂，用三个视点扫描工作区，
+# 运行时拟合桌面、分离目标瓶与其他障碍，然后冻结场景并抓取+放置。
+model_path: /home/hank/piper_ws/src/piper_ros/src/bottle_grab/bottle.pt
+hand_eye_calibration: /home/hank/piper_ws/calibration/eye_in_hand_d435i/session_02/result.json
+# 扫描快照（融合点云、桌面模型、障碍列表、每个视点的彩色图）保存目录。
+scan_artifact_root: /home/hank/piper_ws/calibration/bottle_grasp_scan
+
+# link6->抓取中心的平移(m)和旋转(rad)，不是tool->link6。
+link6_tool_xyz: [0, 0, 0.10]
+link6_tool_rpy: [0.0, 0.0, 0.0]
+
+bottle_height: 0.17
+bottle_radius: 0.03
+# 接触点距拟合桌面上表面的高度(m)，必须位于瓶身内。
+grasp_height_from_table: 0.07
+# 反算后仍存在的、经过实物验证的base_link X/Y残差；初始保持0。
+bottle_center_offset_xy: [0.0, 0.0]
+pregrasp_distance: 0.10
+lift_distance: 0.06         # 不同的建模场景不同
+support_edge_margin: 0.02
+lift_table_margin: 0.005    # 抬升只需越过碰撞盒顶 5mm
+lift_clearance: 0.03
+
+# 完整夹爪开口(m)；joint7/joint8各为开口的一半。
+gripper_opening_open: 0.07
+gripper_opening_close_command: 0.0
+gripper_effort: 1.0
+# 闭合后实测开口范围与负载阈值，按真实瓶子/夹指/驱动反馈校验。
+# 要求：闭合目标 < min < max < 张开目标。
+grasp_opening_min: 0.035
+grasp_opening_max: 0.065
+grasp_effort_min: 0.30
+# 可接额外视觉/夹持传感器的Trigger服务：success=true表示确认抓住。
+# 未填写则依赖经过实物校验的开口+负载+稳定时间，仍不能证明无滑移。
+grasp_check_service: ""
+# 夹爪到位判定容差(m)。
+gripper_tolerance: 0.004
+gripper_feedback_timeout: 4.0
+gripper_settle_time: 1.5
+
+velocity_scale: 0.03
+acceleration_scale: 0.03
+planning_time: 10.0
+planning_attempts: 8
+cartesian_joint_step_limit: 0.15
+approach_yaw_offsets_deg: [30.0, 0.0, -30.0]
+show_detection_window: true
+# null代表任意颜色，可选bottle-y、bottle-g、bottle-b。
+target_bottle_label: null
+
+# ================= 实时扫描 =================
+# semantic：只把扫描得到的语义碰撞体（桌面/目标瓶/障碍）交给MoveIt；
+# both    ：另外把我们剔除目标瓶后的融合点云发布给PointCloudOctomapUpdater。
+scan_mode: semantic
+scan_cloud_topic: /piper/static_scan/points
+
+# 启动后机械臂先走到这个关节位，再按 joint1 偏移依次扫描。
+# 该视点必须能同时看到瓶子和卡片；第一段运动没有地图保护，必须人工确认路径安全。
+scan_start_joint_target: [0.0, 0.691, -1.022, 0.0, 0.838, 0.0]
+# 每个视点相对 scan_start_joint_target 的 joint1 偏移（rad）。3个视点。
+scan_joint1_offsets: [0.0, 0.357, -0.357]
+
+# 每个视点停稳、取帧。至少2帧看到同一体素才保留，抑制飞点/反光。
+scan_settle_time: 1.0
+scan_frames_per_view: 4
+scan_frame_interval: 0.15
+scan_min_frame_votes: 2
+# 融合点至少被几个视点看到（1=任一视点即可，避免漏掉单侧可见的障碍）。
+scan_min_views: 1
+
+# 融合体素(m)与聚类体素(m)。
+scan_voxel_m: 0.006
+scan_cluster_voxel_m: 0.012
+scan_min_points: 500
+scan_min_cluster_points: 40
+# 深度降采样步长与有效深度范围(m)。相机到夹爪的距离小于下限，天然剔除夹爪自身。
+scan_stride: 2
+scan_min_depth: 0.25
+scan_max_range: 2.0
+# base_link下的扫描ROI：覆盖抓取区与卡片顶部，排除地面。
+scan_roi_min: [0.15, -0.45, 0.05]
+scan_roi_max: [0.80, 0.45, 0.75]
+scan_detect_frames: 8
+
+# 桌面拟合（运行时替代离线 table_model.json）。
+scan_table_clearance: 0.015
+scan_footprint_margin: 0.10
+# 桌面以上这个高度以内的点视为桌面本身（纸板起伏/印刷纹理），不建障碍。
+scan_min_obstacle_height: 0.02
+# 后续视点重建障碍时，从点云里抠掉已锁定卡片的包围盒外扩量(m)。
+scan_card_carve_margin: 0.02
+scan_table_plane_threshold: 0.006
+scan_table_voxel: 0.008
+scan_table_max_tilt_deg: 3.0
+scan_table_min_inliers: 300
+scan_table_min_ratio: 0.25
+scan_table_iterations: 200
+scan_table_edge_padding: 0.03
+scan_table_support_depth: 0.02
+scan_table_mask_padding: 0.02
+
+# 目标瓶/卡片判别（纯几何，不依赖颜色）。
+# 卡片：平面度高、双向展开都大于 min_extent、厚度小于 max_thickness。
+scan_card_planarity_m: 0.012
+scan_card_min_extent: 0.10
+scan_card_max_thickness: 0.03
+# 圆柱：拟合半径/高度与参数瓶子一致。
+scan_cylinder_radius_tol: 0.6
+scan_cylinder_height_tol: 0.5
+scan_non_target_cylinder: true
+# 障碍物碰撞体外扩(m)。
+scan_obstacle_padding: 0.01
+# 卡片是薄板，单独用更小的外扩量。
+scan_card_padding: 0.005
+# 卡片中心这个半径内、平面度好且很薄的簇视为卡片支架，不加入障碍集。
+scan_stand_max_distance: 0.25
+scan_stand_max_thickness: 0.03
+# 接近走廊半径(m)：小于该净距的接近方向直接跳过并给出阻挡物名称。
+scan_corridor_radius: 0.06
+scan_corridor_samples: 24
+
+# ================= 放置 =================
+enable_place: true
+# card：把瓶子放到扫描识别出的卡片正前方；fixed：使用place_tool_pose。
+place_mode: card
+place_approach_height: 0.10
+# 放置完成后回到零位。
+home_joint_target: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# 松手点沿卡片正面法向前移的距离(m)。必须大于
+# 瓶半径 + 卡厚/2 + 障碍外扩 + place_card_clearance；
+# 程序还会用"松手点到卡片包围盒的实测距离"兜底检查。
+# 实测本场景卡片约 19x15cm 且向机器人一侧倾斜：0.07 时最近卡片点只有
+# 5.7cm，0.09 时垂直下降仍会被卡片上沿截断，改用 0.11。
+place_offset_from_card: 0.11
+place_card_clearance: 0.015
+# 松手时瓶底离桌面的最小间隙；松开后瓶子自由下落。
+place_release_clearance: 0.005
+# card_normal：按扫描拟合的卡面法向（朝机器人一侧）；
+# toward_robot：按卡片指向base_link原点的水平方向；fixed_yaw：使用place_front_yaw_deg。
+place_front_mode: card_normal
+place_front_yaw_deg: 0.0
+# 卡片检测点到实际卡片中心的base_link XY残差，经实物验证后填写。
+place_card_offset_xy: [0.0, 0.0]
+
+# fixed模式参数：base_link下TCP的[x,y,z,roll,pitch,yaw]，m/rad。
+place_tool_pose: [0.51, 0.35, -0.47, 0.0, 0.65, 0.0]
