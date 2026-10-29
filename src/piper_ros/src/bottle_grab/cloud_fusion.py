@@ -111,6 +111,10 @@ class FusedCloud:
         self._cells = {}
         self.view_count = 0
         self.frame_count = 0
+        # points of the most recent view (base_link), i.e. what a single
+        # camera pose actually saw.  The static obstacle map is published per
+        # view so its ray-casting origin stays the real camera position.
+        self._view_points = np.zeros((0, 3), dtype=float)
 
     def add_view(self, frames):
         """Add one stationary view made of several frames.
@@ -149,10 +153,12 @@ class FusedCloud:
         self.view_count += 1
         self.frame_count += used_frames
         kept = 0
+        view_points = []
         for key, (center_sum, count, votes) in qualified.items():
             if votes < self.min_frame_votes:
                 continue
             kept += 1
+            view_points.append(center_sum / float(count))
             entry = self._cells.get(key)
             if entry is None:
                 self._cells[key] = [center_sum, count, 1]
@@ -160,7 +166,13 @@ class FusedCloud:
                 entry[0] = entry[0] + center_sum
                 entry[1] += count
                 entry[2] += 1
+        self._view_points = (np.asarray(view_points, dtype=float)
+                             if view_points else np.zeros((0, 3), dtype=float))
         return kept
+
+    def last_view_points(self):
+        """Points of the most recent view, before cross-view merging."""
+        return self._view_points.copy()
 
     def points(self, min_views=1):
         """Return ``(points, observations)`` for cells seen by N views."""
@@ -181,3 +193,4 @@ class FusedCloud:
         self._cells.clear()
         self.view_count = 0
         self.frame_count = 0
+        self._view_points = np.zeros((0, 3), dtype=float)

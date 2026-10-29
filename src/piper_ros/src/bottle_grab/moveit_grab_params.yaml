@@ -45,7 +45,7 @@ gripper_settle_time: 1.5
 
 velocity_scale: 0.03
 acceleration_scale: 0.03
-planning_time: 10.0
+planning_time: 20.0
 planning_attempts: 8
 # true：只规划并校验预抓取/直线接近，跳过抓取执行；扫描阶段仍会运动。
 # 先用它连续跑 5~10 次评估成功率，再改回 false 做实机抓取。
@@ -59,16 +59,23 @@ show_detection_window: true
 target_bottle_label: null
 
 # ================= 实时扫描 =================
-# semantic：只把扫描得到的语义碰撞体（桌面/目标瓶/障碍）交给MoveIt；
-# both    ：另外把我们剔除目标瓶后的融合点云发布给PointCloudOctomapUpdater。
-scan_mode: semantic
+# map      ：静态障碍地图（默认）。除目标瓶和精确桌面外，扫描到的一切都进OctoMap。
+# semantic ：旧行为，只把语义障碍盒交给MoveIt（回滚/对比用）。
+# both     ：两者都建（会双重膨胀，只用于调试）。
+scan_mode: map
 scan_cloud_topic: /piper/static_scan/points
+# 点云发布坐标系；必须是标定文件里的camera optical frame（MoveIt用它做raycast原点）。
+scan_camera_frame: camera_color_optical_frame
 
-# 启动后机械臂先走到这个关节位，再按 joint1 偏移依次扫描。
+# 启动后机械臂先走到这个关节位，再按 joint1/joint2 偏移依次扫描。
 # 该视点必须能同时看到瓶子和卡片；第一段运动没有地图保护，必须人工确认路径安全。
 scan_start_joint_target: [0.0, 0.691, -1.022, 0.0, 0.838, 0.0]
-# 每个视点相对 scan_start_joint_target 的 joint1 偏移（rad）。3个视点。
-scan_joint1_offsets: [0.0, 0.357, -0.357]
+# 每个视点相对 scan_start_joint_target 的偏移（rad），做笛卡尔积。
+# joint1 扫 ±45°（5个偏航角），视点0固定为起始位；相机水平视场约70°，相邻视点有重叠。
+scan_joint1_offsets: [-0.7854, -0.3927, 0.0, 0.3927, 0.7854]
+# 第二个维度：关节2俯仰档位。默认只扫一档；要覆盖更高/更矮的障碍时加一档
+# （例如 [0.0, -0.25]），务必先空跑确认方向不会撞桌/撞相机。
+scan_joint2_offsets: [0.0]
 
 # 每个视点停稳、取帧。至少2帧看到同一体素才保留，抑制飞点/反光。
 scan_settle_time: 1.0
@@ -87,9 +94,10 @@ scan_min_cluster_points: 40
 scan_stride: 2
 scan_min_depth: 0.25
 scan_max_range: 2.0
-# base_link下的扫描ROI：覆盖抓取区与卡片顶部，排除地面。
-scan_roi_min: [0.15, -0.45, 0.05]
-scan_roi_max: [0.80, 0.45, 0.75]
+# base_link下的点云ROI：覆盖可达区+余量，并给墙壁/柜子留出空间。
+# 桌面平面拟合不会用整个ROI，而是用目标瓶附近的局部窗口（见scan_table_focus_*）。
+scan_roi_min: [-0.40, -1.20, -0.40]
+scan_roi_max: [1.40, 1.20, 1.30]
 scan_detect_frames: 8
 
 # 桌面拟合（运行时替代离线 table_model.json）。
@@ -107,13 +115,46 @@ scan_table_min_ratio: 0.25
 scan_table_iterations: 200
 scan_table_edge_padding: 0.03
 scan_table_support_depth: 0.02
+# 只用于桌面盒底面；“顶面”现在取拟合平面在footprint上的最高点+epsilon。
 scan_table_mask_padding: 0.02
+# 桌面拟合焦点窗口（以目标瓶表面点为种子）：半径/向下/向上。
+scan_table_focus_radius: 0.30
+scan_table_focus_down: 0.30
+scan_table_focus_up: 0.02
+# 碰撞盒/支撑检查只在这个半径内取footprint（避免飞点和邻桌把盒子撑到2m）。
+scan_table_footprint_radius: 0.60
+# 桌面盒顶面比拟合平面高出的量；不参与地图（地图里的支撑面会被挖掉）。
+scan_table_surface_epsilon: 0.002
+# 后续视点重新拟合的桌面在目标处与上一视点相差超过这个值就弃用（防止拟合到地板）。
+scan_table_max_jump: 0.03
+
+# ================= 静态障碍地图 =================
+# 发布前把每视点降采样到这个体素，控制OctoMap的raycast开销。
+scan_map_cloud_voxel: 0.015
+# 底座自身半径13cm + 3cm余量：地图里挖掉这个圆柱，否则link1一开始就自碰撞。
+scan_map_base_keepout_radius: 0.16
+# 目标瓶挖空半径余量/高度余量（瓶身自己的体素不能挡住指尖）。
+scan_map_target_carve: 0.02
+scan_map_target_height_margin: 0.04
+# 支撑面b2方案：桌面顶面±这个厚度、在桌面footprint+margin内的体素从地图挖掉，
+# 由“顶面精确”的table碰撞盒代替；桌腿/侧面/其他一切仍在地图里。
+scan_map_support_carve: 0.015
+scan_map_support_margin: 0.05
+# 每视点发布后等待OctoMap不再变化（秒/超时秒），再规划下一个视点。
+scan_map_settle_quiet: 1.0
+scan_map_settle_timeout: 20.0
+# 序列化字节数下限：太小说明更新器没收到点云。
+scan_map_min_bytes: 1000
+# 建图后检查当前机械臂状态是否与地图碰撞；自碰撞/底座余量不足会在这里中止。
+scan_map_require_current_valid: true
 
 # 目标瓶/卡片判别（纯几何，不依赖颜色）。
 # 卡片：平面度高、双向展开都大于 min_extent、厚度小于 max_thickness。
 scan_card_planarity_m: 0.012
 scan_card_min_extent: 0.10
 scan_card_max_thickness: 0.03
+# 卡片必须立在支撑面上：离桌面最高的簇顶高度上限（防止大ROI里的墙面板被当成卡片）。
+scan_card_max_top_height: 0.30
 # 圆柱：拟合半径/高度与参数瓶子一致。
 scan_cylinder_radius_tol: 0.6
 scan_cylinder_height_tol: 0.5

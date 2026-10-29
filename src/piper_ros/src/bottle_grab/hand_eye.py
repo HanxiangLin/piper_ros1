@@ -26,6 +26,37 @@ class HandEyeCalibration:
             raise ValueError("手眼标定必须为eye_in_hand且安装父link为link6")
         self.T_link6_color_optical = np.asarray(calibration["ee_T_camera"], dtype=float)
         validate_transform(self.T_link6_color_optical, "手眼外参")
+        self.frames = dict(calibration.get("frames") or {})
+        link = calibration.get("camera_link_T_optical")
+        self.T_camera_link_color_optical = (
+            None if link is None else np.asarray(link, dtype=float))
+        if self.T_camera_link_color_optical is not None:
+            validate_transform(
+                self.T_camera_link_color_optical, "camera_link->optical外参")
+
+    def static_transforms(self):
+        """Return ``[(parent, child, 4x4)]`` for link6->camera_link->optical.
+
+        MoveIt's ``PointCloudOctomapUpdater`` uses the *point-cloud header
+        frame* as the sensor frame, so the static octomap must receive clouds
+        in the camera optical frame and needs this chain in TF.  Values come
+        from the same calibration JSON the point cloud is built with, so the
+        ray-casting origin and the cloud agree.
+        """
+        if self.T_camera_link_color_optical is None:
+            raise RuntimeError(
+                "标定文件缺少camera_link_T_optical，无法发布相机TF")
+        ee = self.frames.get("ee", "link6")
+        camera_link = self.frames.get("camera_link", "camera_link")
+        optical = self.frames.get(
+            "camera_optical", "camera_color_optical_frame")
+        link6_T_camera_link = (
+            self.T_link6_color_optical
+            @ np.linalg.inv(self.T_camera_link_color_optical))
+        return [
+            (ee, camera_link, link6_T_camera_link),
+            (camera_link, optical, self.T_camera_link_color_optical),
+        ]
 
     def make_bottle_pose_in_base(self, bottle_xyz_cam, current_ee_pose_mat):
         """Convert an observed color-optical point to base_link.

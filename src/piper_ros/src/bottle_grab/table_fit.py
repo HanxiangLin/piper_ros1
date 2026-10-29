@@ -96,26 +96,58 @@ def _refine_plane(points, inliers, threshold_m, min_inliers):
     return normal, offset, mask
 
 
+def _plane_z(normal, offset, x, y):
+    if abs(float(normal[2])) < 1e-6:
+        raise ValueError("桌面法向几乎水平，无法求表面高度")
+    return -(float(normal[0]) * x + float(normal[1]) * y
+             + float(offset)) / float(normal[2])
+
+
 def fit_table(points, roi_min, roi_max, plane_threshold_m=0.006,
               voxel_m=0.008, max_tilt_deg=3.0, min_inliers=300,
               min_inlier_ratio=0.25, ransac_iterations=200,
               edge_padding_m=0.03, support_depth_m=0.02,
               mask_padding_m=0.02, min_span_m=0.05, seed=42,
-              max_points=30000):
+              max_points=30000, focus_xyz=None, focus_radius_m=0.30,
+              focus_down_m=0.30, focus_up_m=0.02,
+              footprint_radius_m=None, surface_epsilon_m=0.002):
     """Fit the support plane and return a table model dict.
+
+    ``focus_xyz`` restricts the plane *fitting* to a local window around a
+    known object (normally the detected target bottle) so that a larger floor,
+    a neighbouring desk or a wall inside the same ROI cannot win the RANSAC.
+    ``footprint_radius_m`` caps the reported footprint around ``focus_xyz`` so
+    stray coplanar points cannot inflate the collision box by tens of
+    centimetres; the plane itself is still refitted against the complete cloud.
 
     The returned dict uses the same schema as the offline scanner
     (``version/frame_id/object_id/bounds_*/plane_*``) so existing helpers such
-    as ``table_surface_z`` keep working unchanged.
+    as ``table_surface_z`` keep working unchanged.  ``bounds_max[2]`` is the
+    highest point of the *plane* over the footprint plus ``surface_epsilon_m``
+    (not ``max(inlier z) + mask_padding``): the collision box top must describe
+    the real support surface because the support is carved out of the octomap.
     """
     points, lower_roi, upper_roi = _check_inputs(
         points, roi_min, roi_max, plane_threshold_m, voxel_m, max_tilt_deg,
         min_inliers, min_inlier_ratio, ransac_iterations)
     for name, value in (("edge_padding_m", edge_padding_m),
                         ("support_depth_m", support_depth_m),
-                        ("mask_padding_m", mask_padding_m)):
+                        ("mask_padding_m", mask_padding_m),
+                        ("surface_epsilon_m", surface_epsilon_m)):
         if not np.isfinite(value) or value < 0.0:
             raise ValueError(name + "必须为非负有限值")
+    focus = None
+    if focus_xyz is not None:
+        focus = np.asarray(focus_xyz, dtype=float)
+        if (focus.shape != (3,) or not np.isfinite(focus).all()
+                or not np.isfinite(focus_radius_m) or focus_radius_m <= 0.0
+                or not np.isfinite(focus_down_m) or focus_down_m < 0.0
+                or not np.isfinite(focus_up_m) or focus_up_m < 0.0):
+            raise ValueError("桌面拟合焦点参数无效")
+    if (footprint_radius_m is not None
+            and (not np.isfinite(footprint_radius_m)
+                 or footprint_radius_m <= 0.0)):
+        raise ValueError("桌面footprint半径必须为正有限值")
 
     points = points[np.isfinite(points).all(axis=1)]
     points = points[_inside(points, lower_roi, upper_roi)]
@@ -134,13 +166,24 @@ def fit_table(points, roi_min, roi_max, plane_threshold_m=0.006,
     # 最终仍然只接受精修倾角 <= max_tilt_deg 的平面，安全门没有放松。
     loose_tilt_deg = min(45.0, max_tilt_deg + 15.0)
     loose_cosine = math.cos(math.radians(loose_tilt_deg))
+    fit_points = points
+    fit_scope = "global"
+    if focus is not None:
+        radial = np.linalg.norm(
+            points[:, :2] - focus[None, :2], axis=1)
+        local = points[radial <= float(focus_radius_m)]
+        local = local[(local[:, 2] >= focus[2] - float(focus_down_m))
+                      & (local[:, 2] <= focus[2] + float(focus_up_m))]
+        if len(local) >= int(min_inliers):
+            fit_points = local
+            fit_scope = "focus"
     failures = []
     accepted = None
     for label, sample_cosine in (("严格预筛", strict_cosine),
                                  ("宽松预筛", loose_cosine)):
         rng = np.random.default_rng(seed)
         inliers = _ransac_inliers(
-            points, plane_threshold_m, sample_cosine,
+            fit_points, plane_threshold_m, sample_cosine,
             ransac_iterations, min_inliers, rng)
         if inliers is None:
             failures.append("%s: 未找到足够大的近水平桌面" % label)
@@ -151,8 +194,8 @@ def fit_table(points, roi_min, roi_max, plane_threshold_m=0.006,
                 % (label, inliers.mean(), min_inlier_ratio))
             continue
         try:
-            normal, offset, mask = _refine_plane(
-                points, inliers, plane_threshold_m, min_inliers)
+            normal, offset, _ = _refine_plane(
+                fit_points, inliers, plane_threshold_m, min_inliers)
         except RuntimeError as error:
             failures.append("%s: %s" % (label, error))
             continue
@@ -162,9 +205,15 @@ def fit_table(points, roi_min, roi_max, plane_threshold_m=0.006,
             failures.append(
                 "%s: 精修倾角%.2f°>%.2f°(内点%d/%d)"
                 % (label, tilt_deg, max_tilt_deg,
-                   int(mask.sum()), len(points)))
+                   int(inliers.sum()), len(fit_points)))
             continue
-        if mask.mean() < min_inlier_ratio:
+        mask = np.abs(points @ normal + offset) <= plane_threshold_m
+        if int(mask.sum()) < int(min_inliers):
+            failures.append(
+                "%s: 全ROI内点不足(%d<%d)"
+                % (label, int(mask.sum()), int(min_inliers)))
+            continue
+        if focus is None and mask.mean() < min_inlier_ratio:
             failures.append(
                 "%s: 精修后占比不足(%.2f<%.2f)"
                 % (label, mask.mean(), min_inlier_ratio))
@@ -181,12 +230,22 @@ def fit_table(points, roi_min, roi_max, plane_threshold_m=0.006,
     if np.any(span < min_span_m):
         raise RuntimeError("桌面可见范围太小(%.3fm)，重新扫描" % float(span.min()))
 
-    bounds_min = selected.min(axis=0)
-    bounds_max = selected.max(axis=0)
+    bounds_points = selected
+    if focus is not None and footprint_radius_m is not None:
+        keep = np.linalg.norm(
+            selected[:, :2] - focus[None, :2], axis=1) <= float(footprint_radius_m)
+        if keep.any():
+            bounds_points = selected[keep]
+    bounds_min = bounds_points.min(axis=0)
+    bounds_max = bounds_points.max(axis=0)
     bounds_min[:2] -= edge_padding_m
     bounds_max[:2] += edge_padding_m
-    bounds_min[2] -= support_depth_m + mask_padding_m
-    bounds_max[2] += mask_padding_m
+    surface_top = max(
+        _plane_z(normal, offset, x, y)
+        for x in (bounds_min[0], bounds_max[0])
+        for y in (bounds_min[1], bounds_max[1]))
+    bounds_max[2] = surface_top + surface_epsilon_m
+    bounds_min[2] = selected[:, 2].min() - support_depth_m - mask_padding_m
     return {
         "version": 1,
         "frame_id": "base_link",
@@ -196,7 +255,10 @@ def fit_table(points, roi_min, roi_max, plane_threshold_m=0.006,
         "plane_normal": normal.tolist(),
         "plane_offset": float(offset),
         "inlier_count": int(len(selected)),
+        "footprint_count": int(len(bounds_points)),
         "sample_count": int(len(points)),
+        "fit_scope": fit_scope,
+        "surface_top": float(surface_top),
         "voxel_m": float(voxel_m),
         "note": "运行时扫描拟合的局部支撑桌面包络",
     }

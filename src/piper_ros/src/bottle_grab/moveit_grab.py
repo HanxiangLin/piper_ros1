@@ -20,6 +20,7 @@ sibling modules:
 """
 
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -223,22 +224,33 @@ class PiperVisionController:
             "~gripper_settle_time", minimum=0.0, maximum=10.0)
 
         # ---------------- 扫描参数 ----------------
-        cfg.scan_mode = str(rospy.get_param("~scan_mode", "semantic"))
-        if cfg.scan_mode not in ("semantic", "both"):
-            raise ValueError("~scan_mode必须是semantic或both")
+        cfg.scan_mode = str(rospy.get_param("~scan_mode", "map"))
+        if cfg.scan_mode not in ("map", "semantic", "both"):
+            raise ValueError("~scan_mode必须是map/semantic/both")
         cfg.scan_cloud_topic = str(rospy.get_param(
             "~scan_cloud_topic", "/piper/static_scan/points"))
+        cfg.scan_camera_frame = str(rospy.get_param(
+            "~scan_camera_frame", "camera_color_optical_frame"))
+        if not cfg.scan_camera_frame or cfg.scan_camera_frame.startswith("/"):
+            raise ValueError("~scan_camera_frame必须是相对TF frame名")
         cfg.scan_start_joint_target = numeric_list(
             "~scan_start_joint_target",
             rospy.get_param("~scan_start_joint_target"), 6)
         offsets = rospy.get_param(
-            "~scan_joint1_offsets", [0.0, 0.357, -0.357])
-        if not isinstance(offsets, list) or not 1 <= len(offsets) <= 6:
-            raise ValueError("~scan_joint1_offsets需要1～6个数")
+            "~scan_joint1_offsets", [0.0, 0.3927, -0.3927, 0.7854, -0.7854])
+        if not isinstance(offsets, list) or not 1 <= len(offsets) <= 9:
+            raise ValueError("~scan_joint1_offsets需要1～9个数")
         cfg.scan_joint1_offsets = numeric_list(
             "~scan_joint1_offsets", offsets, len(offsets))
         if any(abs(value) > 0.9 for value in cfg.scan_joint1_offsets):
             raise ValueError("~scan_joint1_offsets单次偏移不能超过0.9rad")
+        pitches = rospy.get_param("~scan_joint2_offsets", [0.0])
+        if not isinstance(pitches, list) or not 1 <= len(pitches) <= 3:
+            raise ValueError("~scan_joint2_offsets需要1～3个数")
+        cfg.scan_joint2_offsets = numeric_list(
+            "~scan_joint2_offsets", pitches, len(pitches))
+        if any(abs(value) > 0.6 for value in cfg.scan_joint2_offsets):
+            raise ValueError("~scan_joint2_offsets单次偏移不能超过0.6rad")
         cfg.scan_settle_time = finite_float(
             "~scan_settle_time", 1.0, minimum=0.0, maximum=5.0)
         cfg.scan_frames_per_view = int(rospy.get_param(
@@ -252,7 +264,8 @@ class PiperVisionController:
         if not 1 <= cfg.scan_min_frame_votes <= cfg.scan_frames_per_view:
             raise ValueError("~scan_min_frame_votes必须在1～帧数内")
         cfg.scan_min_views = int(rospy.get_param("~scan_min_views", 1))
-        if not 1 <= cfg.scan_min_views <= len(cfg.scan_joint1_offsets):
+        view_count = len(cfg.scan_joint1_offsets) * len(cfg.scan_joint2_offsets)
+        if not 1 <= cfg.scan_min_views <= view_count:
             raise ValueError("~scan_min_views不得超过视点数")
         cfg.scan_voxel_m = finite_float(
             "~scan_voxel_m", 0.006, minimum=0.0, maximum=0.05, strict_min=True)
@@ -275,10 +288,10 @@ class PiperVisionController:
             "~scan_max_range", 2.0, minimum=0.3, maximum=8.0)
         cfg.scan_roi_min = numeric_list(
             "~scan_roi_min", rospy.get_param(
-                "~scan_roi_min", [0.15, -0.45, 0.10]), 3)
+                "~scan_roi_min", [-0.40, -1.20, -0.40]), 3)
         cfg.scan_roi_max = numeric_list(
             "~scan_roi_max", rospy.get_param(
-                "~scan_roi_max", [0.80, 0.45, 0.75]), 3)
+                "~scan_roi_max", [1.40, 1.20, 1.30]), 3)
         if np.any(np.asarray(cfg.scan_roi_max)
                   <= np.asarray(cfg.scan_roi_min)):
             raise ValueError("~scan_roi_max必须逐轴大于~scan_roi_min")
@@ -317,6 +330,53 @@ class PiperVisionController:
             "~scan_table_support_depth", 0.02, minimum=0.0, maximum=0.2)
         cfg.scan_table_mask_padding = finite_float(
             "~scan_table_mask_padding", 0.02, minimum=0.0, maximum=0.2)
+        # 桌面拟合焦点：用目标瓶表面点把RANSAC限制在局部窗口，避免大ROI里的
+        # 地板/邻桌赢掉拟合；footprint只用于碰撞盒范围，不改变平面本身。
+        cfg.scan_table_focus_radius = finite_float(
+            "~scan_table_focus_radius", 0.30, minimum=0.05, maximum=1.0,
+            strict_min=True)
+        cfg.scan_table_focus_down = finite_float(
+            "~scan_table_focus_down", 0.30, minimum=0.05, maximum=1.0,
+            strict_min=True)
+        cfg.scan_table_focus_up = finite_float(
+            "~scan_table_focus_up", 0.02, minimum=0.0, maximum=0.20)
+        cfg.scan_table_footprint_radius = finite_float(
+            "~scan_table_footprint_radius", 0.60, minimum=0.10, maximum=2.0,
+            strict_min=True)
+        cfg.scan_table_surface_epsilon = finite_float(
+            "~scan_table_surface_epsilon", 0.002, minimum=0.0, maximum=0.05)
+        cfg.scan_table_max_jump = finite_float(
+            "~scan_table_max_jump", 0.03, minimum=0.005, maximum=0.20,
+            strict_min=True)
+        cfg.scan_card_max_top_height = finite_float(
+            "~scan_card_max_top_height", 0.30, minimum=0.05, maximum=1.0,
+            strict_min=True)
+        # ---------------- 静态障碍地图 ----------------
+        cfg.scan_map_cloud_voxel = finite_float(
+            "~scan_map_cloud_voxel", 0.015, minimum=0.0, maximum=0.10,
+            strict_min=True)
+        # 底座自身半径13cm + 3cm余量；地图里必须挖掉，否则link1一开始就碰撞。
+        cfg.scan_map_base_keepout_radius = finite_float(
+            "~scan_map_base_keepout_radius", 0.16, minimum=0.0, maximum=0.50)
+        cfg.scan_map_target_carve = finite_float(
+            "~scan_map_target_carve", 0.02, minimum=0.0, maximum=0.15)
+        cfg.scan_map_target_height_margin = finite_float(
+            "~scan_map_target_height_margin", 0.04, minimum=0.0, maximum=0.20)
+        cfg.scan_map_support_carve = finite_float(
+            "~scan_map_support_carve", 0.015, minimum=0.0, maximum=0.10)
+        cfg.scan_map_support_margin = finite_float(
+            "~scan_map_support_margin", 0.05, minimum=0.0, maximum=0.30)
+        cfg.scan_map_settle_quiet = finite_float(
+            "~scan_map_settle_quiet", 1.0, minimum=0.0, maximum=10.0)
+        cfg.scan_map_settle_timeout = finite_float(
+            "~scan_map_settle_timeout", 20.0, minimum=1.0, maximum=120.0,
+            strict_min=True)
+        cfg.scan_map_min_bytes = int(rospy.get_param(
+            "~scan_map_min_bytes", 1000))
+        if cfg.scan_map_min_bytes < 100:
+            raise ValueError("~scan_map_min_bytes至少为100")
+        cfg.scan_map_require_current_valid = bool(rospy.get_param(
+            "~scan_map_require_current_valid", True))
         cfg.scan_card_planarity_m = finite_float(
             "~scan_card_planarity_m", 0.012, minimum=0.0, maximum=0.05,
             strict_min=True)
@@ -485,6 +545,7 @@ class PiperVisionController:
             self.gripper.confirm, cfg.velocity_scale, cfg.acceleration_scale,
             cfg.cartesian_joint_step_limit)
         self.hand_eye = HandEyeCalibration(calibration_path)
+        self._ensure_camera_tf()
         self.camera = RealSenseCamera(
             COLOR_WIDTH, COLOR_HEIGHT, DEPTH_WIDTH, DEPTH_HEIGHT, FPS)
         self.detector = BottleDetector(cfg.model_path)
@@ -499,6 +560,76 @@ class PiperVisionController:
             cfg, self.state, self.arm_controller, self.gripper,
             self.scene_manager, self.joint_feedback)
         self.grasp_task.place_task = self.place_task
+
+    def _tf_available(self, parent, child):
+        try:
+            return bool(self.tf_buffer.can_transform(
+                parent, child, rospy.Time(0), rospy.Duration(0.05)))
+        except Exception:  # tf2 LookupException/ExtrapolationException
+            return False
+
+    def _ensure_camera_tf(self):
+        """Make the camera optical frame reachable from base_link.
+
+        MoveIt's ``PointCloudOctomapUpdater`` uses the point-cloud *header*
+        frame as the sensor frame, so the optical frame must be in TF;
+        otherwise the static octomap cannot be built.  The calibration JSON is
+        the single source of truth, and any edge that already exists (for
+        example because ``camera_extrinsics.launch`` or the RealSense driver is
+        running) is left untouched.
+        """
+        try:
+            transforms = self.hand_eye.static_transforms()
+        except RuntimeError as error:
+            raise RuntimeError(
+                "%s；静态障碍地图需要相机TF" % error) from error
+        # 给已有TF一点时间出现（例如camera_extrinsics.launch或驱动刚启动），
+        # 避免重复发布同一对静态TF。
+        missing = list(transforms)
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline:
+            missing = [(parent, child, matrix)
+                       for parent, child, matrix in transforms
+                       if not self._tf_available(parent, child)]
+            if not missing:
+                rospy.loginfo("相机静态TF已存在，沿用现有链路")
+                return
+            rospy.sleep(0.1)
+        from geometry_msgs.msg import TransformStamped
+        from tf2_ros import StaticTransformBroadcaster
+        broadcaster = StaticTransformBroadcaster()
+        messages = []
+        for parent, child, matrix in missing:
+            matrix = np.asarray(matrix, dtype=float)
+            message = TransformStamped()
+            message.header.stamp = rospy.Time.now()
+            message.header.frame_id = parent
+            message.child_frame_id = child
+            message.transform.translation.x = float(matrix[0, 3])
+            message.transform.translation.y = float(matrix[1, 3])
+            message.transform.translation.z = float(matrix[2, 3])
+            quaternion = quaternion_from_matrix(matrix)
+            (message.transform.rotation.x, message.transform.rotation.y,
+             message.transform.rotation.z, message.transform.rotation.w) = [
+                float(value) for value in quaternion]
+            messages.append(message)
+        broadcaster.sendTransform(messages)
+        # keep a reference: the latched publisher must live as long as the node
+        self._static_tf_broadcaster = broadcaster
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if all(self._tf_available(parent, child)
+                   for parent, child, _ in transforms):
+                rospy.loginfo(
+                    "已发布相机静态TF: %s",
+                    ", ".join("%s->%s" % (parent, child)
+                              for parent, child, _ in missing))
+                return
+            rospy.sleep(0.1)
+        raise RuntimeError(
+            "相机静态TF不可用：%s；检查手眼标定文件和camera_extrinsics.launch"
+            % ", ".join("%s->%s" % (parent, child)
+                        for parent, child, _ in missing))
 
     def run(self):
         self.camera.start()

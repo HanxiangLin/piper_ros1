@@ -217,6 +217,32 @@ class MoveItGrabTests(unittest.TestCase):
         self.assertFalse(HandEyeCalibration.held_bottle_contains(
             [0.4, 0.10, 0.30], ee, T, 0.17, 0.03))
 
+    def test_static_transforms_compose_back_to_ee_camera(self):
+        he = HandEyeCalibration.__new__(HandEyeCalibration)
+        link6_T_optical = np.eye(4)
+        link6_T_optical[:3, :3] = np.array([
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ])
+        link6_T_optical[:3, 3] = [0.08, 0.02, 0.04]
+        camera_link_T_optical = np.eye(4)
+        camera_link_T_optical[:3, 3] = [0.0, 0.015, 0.0]
+        he.T_link6_color_optical = link6_T_optical
+        he.T_camera_link_color_optical = camera_link_T_optical
+        he.frames = {"ee": "link6", "camera_link": "camera_link",
+                     "camera_optical": "camera_color_optical_frame"}
+        transforms = he.static_transforms()
+        self.assertEqual(
+            [(parent, child) for parent, child, _ in transforms],
+            [("link6", "camera_link"),
+             ("camera_link", "camera_color_optical_frame")])
+        composed = transforms[0][2] @ transforms[1][2]
+        np.testing.assert_allclose(composed, link6_T_optical, atol=1e-12)
+        he.T_camera_link_color_optical = None
+        with self.assertRaisesRegex(RuntimeError, "camera_link_T_optical"):
+            he.static_transforms()
+
     # ------------------------------------------------------------------
     # Arm controller.
     # ------------------------------------------------------------------

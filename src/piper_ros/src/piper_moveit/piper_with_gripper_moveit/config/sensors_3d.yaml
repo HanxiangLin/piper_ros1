@@ -1,10 +1,18 @@
 sensors:
   - sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
-    # The gate is disabled by default. Raw RealSense data never updates the
-    # planning scene unless the operator explicitly starts a pre-scan.
+    # bottle_grab publishes one carved cloud per scan view in the camera
+    # optical frame, so the ray-casting origin is the real camera pose.
+    # 3 cm padding would close the narrow grasp corridor; 1 cm keeps the
+    # map conservative without making the grasp impossible.
     point_cloud_topic: /piper/static_scan/points
     max_range: 2.0
     point_subsample: 1
+    # NOTE: padding_offset/padding_scale inflate the ROBOT shapes for the
+    # octomap self-filter; they do NOT inflate obstacles.  Keep the original
+    # 3 cm margin so no residual arm point is inserted as an obstacle.
     padding_offset: 0.03
     padding_scale: 1.0
+    # process every published cloud immediately (default 1 Hz would let the
+    # next scan motion start against a stale map)
+    max_update_rate: 10.0
     filtered_cloud_topic: /piper/static_scan/filtered_points

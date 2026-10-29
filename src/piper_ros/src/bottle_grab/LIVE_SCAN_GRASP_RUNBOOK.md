@@ -74,8 +74,22 @@ roslaunch piper_with_gripper_moveit piper_real.launch \
   rosparam get /robot_description_kinematics/arm/kinematics_solver_timeout
   # 期望输出 0.05；若仍是 0.005，说明加载的是别的 config 或没重启。
   ```
+- **静态障碍地图依赖 `move_group` 里的 OctoMap 监控**。`sensors_3d.yaml`
+  （量程 2m / 更新 10Hz / 自体过滤 3cm）和 `sensor_manager.launch.xml`（体素 2cm）
+  改动后**必须重启 `piper_real.launch`**，不会热加载。启动后确认：
+
+  ```bash
+  rosparam get /move_group/octomap_resolution       # 期望 0.02
+  rosservice list | grep -E 'clear_octomap|get_planning_scene'
+  ```
+
+  如果 `move_group` 启动时没加载 sensors（`allow_trajectory_execution=false`），
+  扫描会在第一视点报“发布点云后OctoMap未变化”。
 - **不要**再启动 `eye_in_hand_camera.launch`、`realsense2_camera`、`static_scene_mapping.launch`：
-  新流程自己用 SDK 打开 D435i，相机节点占用设备会直接报错。
+  新流程自己用 SDK 打开 D435i，相机节点占用设备会直接报错。相机
+  `link6 → camera_link → camera_color_optical_frame` 静态 TF 由程序按标定文件
+  自动发布（如果 TF 里已有则沿用），所以也不需要单独启动
+  `camera_extrinsics.launch`。
 
 ---
 
@@ -104,7 +118,7 @@ $PY -c "import pyrealsense2 as rs; print([d.get_info(rs.camera_info.name) for d 
 rosrun moveit_ctrl static_scan_control.py status 2>/dev/null || echo "扫描门节点未运行（正常）"
 
 # 4.6 参数文件包含新键
-grep -E "scan_start_joint_target|scan_joint1_offsets|place_offset_from_card|home_joint_target" $PARAMS
+grep -E "scan_mode|scan_camera_frame|scan_joint1_offsets|scan_joint2_offsets|scan_map_base_keepout_radius|place_offset_from_card|home_joint_target" $PARAMS
 
 # 4.7 IK超时生效值（A阶段诊断项，必须是0.05）
 rosparam get /robot_description_kinematics/arm/kinematics_solver_timeout
@@ -134,17 +148,32 @@ cd $BG
 $PY moveit_grab.py _params_file:=$BG/moveit_grab_params.yaml
 ```
 
-启动即开始动作：清场 → 抬臂 → 三视点扫描 → 冻结 → 抓取 → 放置 → 回零。
-预计抓取开始前 30~40 秒，放置再加 20~30 秒。
+启动即开始动作：清场 → 抬臂 → 5 个偏航视点扫描（每视点直接建静态障碍地图）
+→ 冻结 → 抓取 → 放置 → 回零。
+预计抓取开始前 60~90 秒（每个视点约 6~8 秒 + 地图稳定 1~2 秒），放置再加 20~30 秒。
+
+扫描阶段的碰撞场景现在是：
+
+| 对象 | 来源 | 说明 |
+|---|---|---|
+| `table` | 拟合平面 | 顶面**精确**等于支撑平面（不再抬 2cm） |
+| `target_bottle` | 圆柱拟合 | 指尖可以接触；其余一律禁止 |
+| `<octomap>` | 每视点发布 | 桌面/墙/柜子/**其它瓶子**等扫描到的一切 |
+
+即“除目标瓶和支撑面外，全部是障碍”。旧的语义障碍盒（`scan_obstacle_*`）默认不再创建。
 
 ### 5.1 临时覆盖单个参数（不改文件）
 
 rospy 会解析命令行的 `_参数:=值`，优先级高于 `_params_file`：
 
 ```bash
-# 只用两个视点，摆幅小一点（瓶子被遮挡时改这个）
+# 只用三个偏航视点，扫描更快（瓶子两侧仍能看到时）
 $PY moveit_grab.py _params_file:=$BG/moveit_grab_params.yaml \
-  _scan_joint1_offsets:="[0.0, 0.25, -0.25]"
+  _scan_joint1_offsets:="[0.0, 0.4, -0.4]"
+
+# 加一档俯仰，覆盖更高/更矮的障碍（先空跑确认方向）
+$PY moveit_grab.py _params_file:=$BG/moveit_grab_params.yaml \
+  _scan_joint2_offsets:="[0.0, -0.25]"
 
 # 只抓不放，抓完抬升即停（此时不会回零）
 $PY moveit_grab.py _params_file:=$BG/moveit_grab_params.yaml \
@@ -162,10 +191,6 @@ $PY moveit_grab.py _params_file:=$BG/moveit_grab_params.yaml \
 $PY moveit_grab.py _params_file:=$BG/moveit_grab_params.yaml \
   _scan_card_padding:=0.008
 
-# 卡片旁边的薄板不算障碍（默认 25cm 内、厚度 <3cm 视为支架）
-$PY moveit_grab.py _params_file:=$BG/moveit_grab_params.yaml \
-  _scan_stand_max_distance:=0.30
-
 # 接近走廊放宽（瓶子和卡片靠得比较近时）
 $PY moveit_grab.py _params_file:=$BG/moveit_grab_params.yaml \
   _scan_corridor_radius:=0.04
@@ -178,9 +203,13 @@ $PY moveit_grab.py _params_file:=$BG/moveit_grab_params.yaml \
 $PY moveit_grab.py _params_file:=$BG/moveit_grab_params.yaml \
   _place_yaw_offsets_deg:="[0.0, 15.0, -15.0, 30.0, -30.0]"
 
-# 保留语义碰撞体，同时把清洗后的点云喂给 OctoMap
+# 地图把抓取通道封死时：先缩小支撑面挖除厚度/加大底座余量排查
 $PY moveit_grab.py _params_file:=$BG/moveit_grab_params.yaml \
-  _scan_mode:=both
+  _scan_map_support_carve:=0.020
+
+# 回滚到旧语义障碍（只用于对比，不建地图）
+$PY moveit_grab.py _params_file:=$BG/moveit_grab_params.yaml \
+  _scan_mode:=semantic
 
 # 关掉 OpenCV 检测窗口
 $PY moveit_grab.py _params_file:=$BG/moveit_grab_params.yaml \
@@ -196,7 +225,7 @@ roslaunch piper_with_gripper_moveit piper_real.launch \
 
 ### 5.2 A 阶段：IK / 接近成功率测试（不动机器人）
 
-`dry_run` 只跳过抓取执行，扫描阶段仍会走到 3 个视点。固定瓶子位置后连续跑
+`dry_run` 只跳过抓取执行，扫描阶段仍会走到全部视点（并建图）。固定瓶子位置后连续跑
 5~10 次：
 
 ```bash
@@ -239,38 +268,25 @@ YOLO模型加载完成
 >>> 张开夹爪
 >>> 扫描：清场并移动到扫描起始位
 视点0采集4帧，ROI内最多NNNNN点
-桌面拟合: 视点0 倾角x.xx°(门限5.00°) 内点NNNN/NNNN 法向[..., ..., ...]
-桌面已载入: x[...] y[...] 表面z=...
 >>> 检测场景中的全部物体
-扫描检测到 2 个物体: bottle-g(0.9x), bottle-g(0.8x)
+扫描检测到 2 个物体: bottle-b(0.9x), bottle-g(0.8x)
+桌面拟合: 视点0 倾角x.xx°(门限5.00°) 内点NNNN/NNNN footprint=NNNN 范围focus 法向[..., ..., ...]
+桌面已载入: x[...] y[...] 表面z=... 顶面=...
 >>> 目标瓶已加入场景: 目标瓶 center=(...) ...
->>> 扫描视点1: joint1偏移0.357
->>> 扫描视点2: joint1偏移-0.357
-扫描结果: 桌面平面 z=... / 目标瓶 ... / 障碍物 N 个 / 卡片 ...
-场景已冻结：桌面+目标瓶+N个障碍
+视点0障碍地图: 输入NNNN 底座挖除NN 目标挖除NN 支撑挖除NNN 降采样NNNN → 发布NNNN点
+>>> 扫描视点1: joint1偏移+0.393 joint2偏移+0.000
+...
+>>> 扫描视点4: joint1偏移-0.785 joint2偏移+0.000
+障碍地图已建立: frame=dummy_link 分辨率=0.020m 序列化NNNNNN字节
+当前机械臂状态与障碍地图无碰撞
+扫描结果: 桌面平面 z=... / 目标瓶 ... / 障碍物 0 个 / 卡片 ...
+场景已冻结：桌面+目标瓶+0个语义障碍；OctoMap=非空
 >>> 开始MoveIt视觉抓取任务
-就近IK关节目标: joint1=... joint2=... ... joint6=...(余...)
-候选通过: 偏转+0.0度 代价x.xxx (路径x.xx 接近x.xx 腕部x.xx 限位0.0000) 净距0.xxxm
-选择候选: 水平偏转+0.0度 代价x.xxx (...) 净距0.xxxm；有效候选5/5
->>> 执行预抓取轨迹
->>> 碰撞检查下直线接近瓶子
->>> 闭合夹爪并检查实测开口
-开口/负载稳定，夹持检查通过: opening=... effort=...
->>> 携带瓶子沿base Z提升
->>> 抓取完成，先回零位再放置
-放置目标: card=(...) bottle_center=(...) 径向=xx.x° 候选yaw=...
->>> 检查多个放置方向
-就近IK关节目标: ...
-放置候选通过: 偏转+0.0度 直线下降完整 代价x.xxx (路径x.xx 下降x.xx 腕部x.xx 限位0.0000)
-选择放置候选: 水平偏转+0.0度 代价x.xxx (...) 有效7/7 完整下降7
->>> 执行预放置轨迹
->>> 碰撞检查下直线下降到放置位
->>> 张开夹爪
->>> 等待机械臂松手后静止
->>> 抬升撤离
->>> 放置完成，世界瓶子仍保留在场景中
->>> 放置完成，回到零位
+...
 ```
+
+如果 `move_group` 没有消费点云，第一视点就会报
+`发布点云后OctoMap未变化`，不要继续调抓取参数。
 
 出现 `扫描未识别出卡片`、`未找到圆柱形目标瓶`、`没有可行的接近走廊` 时，程序在**任何运动之前**
 就退出（扫描阶段除外），不会残留夹持状态。
@@ -290,12 +306,14 @@ Display → MotionPlanning → Planned Path → Show Trail = true
 
 | 对象 | 形态 |
 |---|---|
-| `table` | 一个扁盒，上表面略高于真实桌面（保留 2cm 包络） |
-| `scan_obstacle_card` | 卡片：贴着卡面的薄盒，厚度约 1.5cm（id 固定，不随视点变化） |
-| `scan_obstacle_N` | 其余障碍：真实的圆柱才是圆柱；薄板是斜的薄盒；只有立体杂物才是 AABB |
-| `target_bottle` | 一个圆柱，中心在瓶子轴线上 |
+| `table` | 一个扁盒，**上表面精确等于拟合的支撑平面**（不再抬高 2cm） |
+| `target_bottle` | 一个圆柱，中心在瓶子轴线上；指尖允许接触 |
+| `<octomap>` | 彩色体素：桌面以外的墙、柜子、显示器、其它瓶子等**全部**扫描到的障碍 |
 
-如果 `target_bottle` 套在卡片上、或卡片盒把瓶子包住，立刻 Ctrl-C，看第 8 节的产物再调参数。
+默认不再有 `scan_obstacle_*`（`scan_mode=semantic` 回滚时才会出现）。
+
+如果 `target_bottle` 套在卡片上、或地图把瓶子/夹爪也包进去了，立刻 Ctrl-C，
+看第 8 节的地图快照再调参数。
 
 ---
 
@@ -315,6 +333,12 @@ cat "$d/summary.txt"
 python3 -m json.tool "$d/table_model.json" | head -30
 python3 -m json.tool "$d/scene.json" | head -80
 
+# 每个视点实际发布给OctoMap的点（已挖掉底座/目标/支撑面）
+ls "$d/map"
+cat "$d/map/meta.json"
+# 可恢复快照（与 static_scene_snapshot.py load 兼容）
+ls -lh "$d/map/octomap_snapshot.bag"
+
 $PY - <<PY
 import numpy as np
 data = np.load("$d/cloud.npz")
@@ -322,6 +346,9 @@ points, views = data["points"], data["observations"]
 print("点数:", points.shape)
 print("范围 min:", points.min(0).round(3), "max:", points.max(0).round(3))
 print("每个体素被几个视点看到:", np.bincount(views))
+view0 = np.load("$d/map/view_00.npz")
+print("视点0发布点数:", len(view0["points_base"]))
+print("视点0挖除统计在 meta.json；octomap.npz 里是冻结后的序列化八叉树")
 PY
 ```
 
@@ -333,12 +360,16 @@ xdg-open "$d/view_0.png"
 
 判读要点：
 
-- `summary.txt` 里的桌面 z 应和实际桌面高度相差 < 1cm，x/y 范围应覆盖整个桌面。
+- `summary.txt` 里的桌面 z 是**桌面中心**处的平面高度，应和实际桌面相差 < 1cm。
+- `table_model.json` 的 `fit_scope` 应为 `focus`；如果是 `global`，说明没拿到目标瓶
+  检测点，桌面拟合退化成了全局拟合（大 ROI 下可能选到地板）。
+- `bounds_max[2] - surface_top` 应约等于 `scan_table_surface_epsilon`（默认 2mm），
+  不再包含 2cm 膨胀。
 - `scene.json` 的 `card.center` 应在卡片位置，`card.width/length` 约 0.20/0.15。
-- `summary.txt` 里应有一行 `已排除卡片支架 N 个`；如果 N=0 但你在现场确实看到支架，
-  说明它不在 25cm 半径内或不够薄，需要调 `scan_stand_max_distance`。
+- `map/meta.json` 里每个视点都应有 `published > 0`，且 `octomap.bytes` 不应小于
+  `scan_map_min_bytes`。
 - `target_center` 应与瓶轴重合；如果偏向相机一侧，说明把可见表面当成了轴线。
-- `obstacles` 只应有卡片（以及桌上的其他物体），不应包含机械臂或夹爪。
+- 默认 `scene.json` 的 `obstacles` 为空——障碍现在全在 OctoMap 里。
 
 ---
 
@@ -357,10 +388,22 @@ $PY moveit_grab.py _params_file:=$PARAMS
 RuntimeError: 未找到圆柱形目标瓶: 簇0 kind=unknown ...
 ```
 
-看到 `桌面已载入: ... 表面z=` 与现场一致、且 `view_0/1/2.png` 能清楚拍到桌面，
-就说明相机、深度、TF、清场、桌面拟合都正常。此时**没有任何抓取动作**。
+看到 `桌面已载入: ... 表面z=... 顶面=...` 与现场一致、`view_0.png` 能清楚拍到桌面，
+就说明相机、深度、TF、清场、桌面拟合都正常。**注意：没有目标瓶时程序在发布第一幅
+障碍地图之前就中止了**，所以这一步不验证 OctoMap 链路。此时**没有任何抓取动作**。
 
-验证完再放瓶子和卡片重新跑第 5 节。
+要验证“扫描 + 建图 + 规划”整条链路，放上瓶子和卡片后用 dry_run：
+
+```bash
+cd $BG
+$PY moveit_grab.py _params_file:=$PARAMS _dry_run:=true
+```
+
+预期看到 5 个视点的 `视点N障碍地图: ...`、`障碍地图已建立`、
+`当前机械臂状态与障碍地图无碰撞`，然后所有接近候选规划通过、日志出现
+`dry_run: 预抓取与直线接近校验通过` 并退出（不会动夹爪、不会抬升）。
+
+验证完再按第 5 节正式运行。
 
 ---
 
@@ -372,12 +415,19 @@ RuntimeError: 未找到圆柱形目标瓶: 簇0 kind=unknown ...
 | `缺少实测任务参数: ~scan_start_joint_target` | 参数文件没加载：确认 `_params_file:=` 路径存在 |
 | `无法清空残留OctoMap` | 手动 `rosservice call /clear_octomap`；仍失败就重启 `piper_real.launch` |
 | `规划场景中存在未知对象，拒绝清场` | 上一次手工在 RViz 加过东西；RViz 里删掉，或重启 `move_group` |
+| `相机静态TF不可用` / `静态障碍地图需要相机TF` | 标定文件缺 `camera_link_T_optical`，或 TF 里已有冲突的 `link6→camera_link`；检查 `result.json` 与是否有别的节点在发相机TF |
+| `发布点云后OctoMap未变化` | `move_group` 没加载 `sensors_3d.yaml`（需 `allow_trajectory_execution=true`），或 `camera_color_optical_frame → dummy_link` 不可达；重启 `piper_real.launch` 并确认 `rosservice list` 有 `clear_octomap` |
+| `OctoMap在xxs内未稳定` | 点云更新器进程卡住/一直在收数据；`rostopic hz /piper/static_scan/points` 只应有扫描时发布，检查是否有遗留扫描门在转发 |
+| `障碍地图为空` / `障碍地图过小` | 同上；另外确认 `scan_roi_min/max` 没把视野全裁掉 |
+| `机器人状态无效/碰撞: [('link1','<octomap>')]`（建图后自检） | 底座余量不足：把 `_scan_map_base_keepout_radius` 从 0.16 加到 0.18~0.20；仍失败说明相机看到了机械臂自身，需在扫描位避开 |
 | `扫描ROI内有效点不足` / `桌面平面占比不足` | 视点没看到桌面，或 ROI 混入地面/墙：调 `_scan_roi_min:="[0.2,-0.35,0.12]"` 之类 |
 | `桌面平面拟合失败: 严格预筛: ... 宽松预筛: 精修倾角x.xx°>3.00°(内点N/M)` | 已自动用宽松预筛重试过。中间视点的门限是 `scan_table_max_tilt + 2°`，**最后一个视点**仍是严格的 `scan_table_max_tilt`；如果失败发生在最后视点，说明冻结给抓取的融合桌面确实倾斜，先调平桌面/机器人底座，不要靠调阈值绕过。看 `桌面拟合: 视点N 倾角...(门限...)` 即可定位 |
+| `桌面拟合` 日志里 `范围global`（而不是 `范围focus`） | 第一视点没拿到瓶子检测点，RANSAC 退化到全局；大 ROI 下可能拟合到地板。先解决 YOLO 检测 |
 | `未找到圆柱形目标瓶` | 点太少/聚类太碎：`_scan_min_cluster_points:=20`；或 `_scan_min_depth:=0.20` |
-| `存在多个圆柱候选` | 桌上有多个瓶子：`_target_bottle_label:=bottle-g`（y/g/b） |
-| `扫描未识别出卡片` | `_scan_card_min_extent:=0.08`，或把卡片立正一点 |
-| `目标瓶在多视点融合中丢失` | 某个视点看不到瓶子：`_scan_joint1_offsets:="[0.0,0.25,-0.25]"` |
+| `存在多个圆柱候选且无法用检测唯一确定目标` | 桌上有多个瓶子且YOLO分数接近：加 `_target_bottle_label:=bottle-g`（y/g/b），或移走多余瓶子 |
+| `扫描未识别出卡片` | `_scan_card_min_extent:=0.08`，或把卡片立正一点；卡片必须是立在支撑面上（`scan_card_max_top_height`） |
+| `目标瓶在多视点融合中丢失` | 某个视点看不到瓶子：`_scan_joint1_offsets:="[0.0,0.35,-0.35]"` |
+| `物体接触区域靠近table边界` | 松手点在**已观测到的**支撑面之外（现在 footprint 以瓶子为中心 0.6m）：缩小 `_place_offset_from_card`，或把扫描视点/ROI 调到能看到卡片外侧桌面 |
 | `没有可行的接近走廊` | 日志里会写“被哪个 id 挡住、净距多少”；调 `_scan_corridor_radius:=0.04` |
 | `没有有效的预抓取/直线接近候选: ...；预抓取位..度不可达/碰撞: KDL无IK解` | 只有**预抓取规划本身**失败时才出现：14 组初值都解不出，多半是真的不可达/关节限位。换 `_approach_yaw_offsets_deg`，或考虑 B 阶段/TRAC-IK |
 | `直线接近诊断(原始0.xxx): 第N/M步发生碰撞: [('link6','table')]` | 直线段本身 IK 可达，是碰撞：按接触对检查桌面碰撞盒、瓶子 ACM、`_cartesian_joint_step_limit`，不要继续调 IK |
@@ -458,6 +508,13 @@ $PY -m unittest tests.test_scan_geometry -v
 ## 14. 本次已知边界（贴在这里提醒操作者）
 
 - 第一段“当前位 → 扫描起始位”是 OMPL 规划，**没有地图保护**。
-- 相机和支架没有碰撞几何：正上方没有悬空物时才安全。
-- 冻结后新增/移动的障碍看不见；只在每段运动前比对场景签名。
-- 扫描期间不做跨扫描差分，只做帧间投票；人走过会可能留下残影（多视点投票能滤掉一部分）。
+- 障碍地图是**静态快照**：只包含扫描时各视点实际看到的面。遮挡区、背面、2m 以外、
+  以及扫描结束之后才出现/移动的障碍都**不会被避开**。
+- 扫描时进入视野的人手/工具/移动物会作为障碍永久留在快照里（不会自动消失）；
+  重新跑一次扫描才能清除。
+- 底座附近 0.16m 圆柱被挖掉（底座自身半径 13cm + 3cm 余量）；相机/支架没有碰撞几何。
+- 手眼标定残差仍有 ~12mm，地图里的障碍位置和桌面高度就带着约 1cm 的误差。
+- 默认 `scan_mode=map` 不再生成 `scan_obstacle_*` 语义盒；卡片只作为**放置几何模型**，
+  它的碰撞由 OctoMap 负责。
+- 支撑面用“顶面精确的 table 盒”表示，桌面顶面 ±1.5cm 的体素从地图里挖掉；
+  贴桌面放置的薄物体（<1.5cm）会因此看不到，需要时用 `scan_map_support_carve` 调整。

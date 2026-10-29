@@ -188,6 +188,7 @@ def classify(description, config):
     circle = description["circle"]
     planarity_m = float(config.scan_card_planarity_m)
     small_extent = min(plane["extent_u"], plane["extent_v"])
+    max_top = float(getattr(config, "scan_card_max_top_height", 0.30))
     is_plate = (
         plane["rms"] <= planarity_m
         and plane["ratio"] >= 0.85
@@ -195,7 +196,10 @@ def classify(description, config):
         and plane["thickness"] <= float(config.scan_card_max_thickness)
         # A bottle shell also has one almost-planar direction; a real plate is
         # flat compared with its own size.
-        and plane["thickness"] <= 0.3 * small_extent)
+        and plane["thickness"] <= 0.3 * small_extent
+        # With a room-sized ROI a wall panel would otherwise look like a huge
+        # standing card.  The placement card stands on the support plane.
+        and description["top_height"] <= max_top)
     if is_plate:
         return "card"
 
@@ -238,8 +242,14 @@ def associate_detections(detections, clusters):
     return labels
 
 
-def choose_target(descriptions, config):
-    """Return the index of the single cylinder-shaped cluster."""
+def choose_target(descriptions, config, detections=None):
+    """Return the index of the single cylinder-shaped cluster.
+
+    Multiple bottles are allowed: the rest become obstacles.  When the colour
+    filter cannot disambiguate them, the bottle that matches the most confident
+    YOLO detection wins -- but only when the match is unambiguous.  Guessing
+    between two equally close bottles is refused.
+    """
     candidates = [index for index, item in enumerate(descriptions)
                   if item["kind"] == "cylinder"]
     if config.target_label is not None and candidates:
@@ -249,6 +259,21 @@ def choose_target(descriptions, config):
             candidates = matched
     if len(candidates) == 1:
         return candidates[0]
+    if len(candidates) > 1 and detections:
+        confident = max(detections, key=lambda item: float(item.get("conf") or 0.0))
+        surface = confident.get("surface_base")
+        if surface is not None:
+            surface = np.asarray(surface, dtype=float)
+            distances = np.asarray([
+                float(np.linalg.norm(
+                    np.asarray(descriptions[index]["centroid"], dtype=float)
+                    - surface))
+                for index in candidates])
+            order = np.argsort(distances)
+            if (distances[order[0]] <= 0.08
+                    and (len(order) == 1
+                         or distances[order[1]] - distances[order[0]] >= 0.02)):
+                return candidates[int(order[0])]
     summary = "; ".join(
         "簇%d kind=%s 半径=%.3f 高=%.3f 平面度=%.2f"
         % (index, item["kind"],
@@ -257,7 +282,7 @@ def choose_target(descriptions, config):
         for index, item in enumerate(descriptions))
     if not candidates:
         raise RuntimeError("未找到圆柱形目标瓶: " + summary)
-    raise RuntimeError("存在多个圆柱候选，无法确定目标: " + summary)
+    raise RuntimeError("存在多个圆柱候选且无法用检测唯一确定目标: " + summary)
 
 
 def nearest_cluster(point, clusters):
@@ -481,8 +506,10 @@ def _summary(table, target, card, specs, stands=None):
         return "%.3f" % value
 
     return [
-        "桌面平面 z=%.4f 范围 x[%.3f,%.3f] y[%.3f,%.3f]"
-        % (_table_z(table, 0.0, 0.0),
+        "桌面平面 z=%.4f(中心) 范围 x[%.3f,%.3f] y[%.3f,%.3f]"
+        % (_table_z(table,
+                    0.5 * (table["bounds_min"][0] + table["bounds_max"][0]),
+                    0.5 * (table["bounds_min"][1] + table["bounds_max"][1])),
            table["bounds_min"][0], table["bounds_max"][0],
            table["bounds_min"][1], table["bounds_max"][1]),
         "目标瓶 center=(%.4f, %.4f, %.4f) 实测半径=%s 实测高=%s 颜色=%s"
@@ -575,7 +602,7 @@ def build(points, table, config, target_center=None, detections=None,
             % (float(getattr(config, "scan_min_obstacle_height", 0.0)) * 1000))
 
     if target_center is None:
-        target_index = choose_target(descriptions, config)
+        target_index = choose_target(descriptions, config, detections)
     else:
         target_index = None
         best = float("inf")

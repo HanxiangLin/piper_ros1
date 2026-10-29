@@ -20,8 +20,10 @@ def scan_config(root):
     return SimpleNamespace(
         scan_mode="semantic",
         scan_cloud_topic="/piper/static_scan/points",
+        scan_camera_frame="camera_color_optical_frame",
         scan_start_joint_target=[0.0, 0.297, -0.648, 0.0, 0.878, 0.0],
         scan_joint1_offsets=[0.0, 0.357, -0.357],
+        scan_joint2_offsets=[0.0],
         scan_settle_time=0.0,
         scan_frames_per_view=2,
         scan_frame_interval=0.0,
@@ -48,9 +50,26 @@ def scan_config(root):
         scan_table_edge_padding=0.03,
         scan_table_support_depth=0.02,
         scan_table_mask_padding=0.02,
+        scan_table_focus_radius=0.30,
+        scan_table_focus_down=0.30,
+        scan_table_focus_up=0.02,
+        scan_table_footprint_radius=0.60,
+        scan_table_surface_epsilon=0.002,
+        scan_table_max_jump=0.03,
+        scan_map_cloud_voxel=0.015,
+        scan_map_base_keepout_radius=0.16,
+        scan_map_target_carve=0.02,
+        scan_map_target_height_margin=0.04,
+        scan_map_support_carve=0.015,
+        scan_map_support_margin=0.05,
+        scan_map_settle_quiet=0.0,
+        scan_map_settle_timeout=1.0,
+        scan_map_min_bytes=1000,
+        scan_map_require_current_valid=False,
         scan_card_planarity_m=0.012,
         scan_card_min_extent=0.10,
         scan_card_max_thickness=0.03,
+        scan_card_max_top_height=0.30,
         scan_cylinder_radius_tol=0.6,
         scan_cylinder_height_tol=0.5,
         scan_non_target_cylinder=True,
@@ -136,7 +155,8 @@ class ScanTaskTests(unittest.TestCase):
     def test_scan_builds_target_card_and_obstacles(self):
         task, state, arm, scene, detector, root = self.build()
         frames = [scene_cloud()[:12000], scene_cloud()[:12000]]
-        task._capture = MagicMock(return_value=(frames, None))
+        task._capture = MagicMock(
+            return_value=(frames, None, np.eye(4), None))
         result = task.execute()
 
         # 三个视点：起始位 + 两个 joint1 偏移。
@@ -165,6 +185,49 @@ class ScanTaskTests(unittest.TestCase):
         self.assertTrue((folders[0] / "cloud.npz").is_file())
         self.assertTrue((folders[0] / "table_model.json").is_file())
 
+    def test_map_mode_publishes_one_cloud_per_view_and_no_semantic_boxes(self):
+        task, state, arm, scene, detector, root = self.build()
+        task.config.scan_mode = "map"
+        task.map_mode = True
+        task.semantic_obstacles = False
+        task._cloud_pub = MagicMock()
+
+        signatures = {"count": 0}
+
+        def octomap_signature():
+            signatures["count"] += 1
+            return ("sig", signatures["count"])
+
+        scene.octomap_signature.side_effect = octomap_signature
+        scene.wait_octomap_quiet.side_effect = (
+            lambda *args, **kwargs: ("sig", signatures["count"] + 1))
+        scene.octomap_snapshot.return_value = {
+            "frame": "dummy_link", "id": "OcTree", "binary": True,
+            "resolution": 0.02, "data": np.zeros(4000, dtype=np.uint8),
+            "bytes": 4000, "sha256": "deadbeef"}
+        frames = [scene_cloud()[:12000], scene_cloud()[:12000]]
+        stamp = SimpleNamespace(to_sec=lambda: 123.0)
+        task._capture = MagicMock(
+            return_value=(frames, None, np.eye(4), stamp))
+        result = task.execute()
+        self.assertEqual(task._cloud_pub.publish.call_count, 3)
+        for call in task._cloud_pub.publish.call_args_list:
+            self.assertEqual(
+                call[0][0].header.frame_id, "camera_color_optical_frame")
+        # 默认map模式不建语义障碍盒。
+        scene.set_obstacles.assert_not_called()
+        self.assertEqual(result["obstacles"], [])
+        self.assertEqual(len(task._map_views), 3)
+        # 目标瓶的体素必须被挖掉，否则指尖会撞到瓶子自己的点。
+        published = task._map_views[0]["points_base"]
+        target = np.array([0.50, -0.15])
+        radial = np.linalg.norm(published[:, :2] - target, axis=1)
+        self.assertTrue(np.all(radial > task.config.bottle_radius + 0.01))
+        # 地图快照落盘。
+        folders = list(Path(root).glob("scan_*"))
+        self.assertTrue((folders[0] / "map" / "octomap.npz").is_file())
+        self.assertTrue((folders[0] / "map" / "meta.json").is_file())
+
     def test_table_tilt_limit_is_strict_only_on_last_view(self):
         task, *_ = self.build()
         self.assertAlmostEqual(task._table_tilt_limit(0), 5.0)
@@ -172,10 +235,20 @@ class ScanTaskTests(unittest.TestCase):
         # 最后一个视点的融合桌面才是冻结给抓取用的，必须严格。
         self.assertAlmostEqual(task._table_tilt_limit(2), 3.0)
 
+    def test_frozen_table_must_pass_the_strict_tilt_limit(self):
+        import math
+        task, *_ = self.build()
+        task._require_final_table_tilt({"plane_normal": [0.0, 0.0, 1.0]})
+        angle = math.radians(6.0)
+        with self.assertRaisesRegex(RuntimeError, "最终桌面倾角"):
+            task._require_final_table_tilt(
+                {"plane_normal": [math.sin(angle), 0.0, math.cos(angle)]})
+
     def test_missing_card_aborts_before_freeze(self):
         task, state, arm, scene, detector, root = self.build()
         table_only = scene_cloud()[:12000]
-        task._capture = MagicMock(return_value=([table_only], None))
+        task._capture = MagicMock(
+            return_value=([table_only], None, np.eye(4), None))
         with patch.object(scan_task_module.obstacle_model, "build",
                           return_value=({"target": {
                               "center": np.array([0.5, -0.15, 0.085]),
@@ -207,7 +280,8 @@ class ScanTaskTests(unittest.TestCase):
     def test_target_jump_between_views_is_rejected(self):
         task, state, arm, scene, detector, root = self.build()
         cloud = scene_cloud()
-        task._capture = MagicMock(return_value=([cloud], None))
+        task._capture = MagicMock(
+            return_value=([cloud], None, np.eye(4), None))
         with patch.object(scan_task_module.obstacle_model, "build") as build:
             build.side_effect = [
                 self.built(center_y=-0.15),

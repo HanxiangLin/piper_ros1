@@ -185,7 +185,8 @@ class TableFitTests(unittest.TestCase):
                                delta=0.003)
         self.assertLessEqual(model["bounds_min"][0], 0.30)
         self.assertGreaterEqual(model["bounds_max"][0], 0.80)
-        self.assertGreaterEqual(model["bounds_max"][2], 0.01)
+        # 顶面现在精确等于支撑平面+epsilon，而不是 max(inlier z)+2cm padding。
+        self.assertAlmostEqual(model["bounds_max"][2], 0.002, delta=0.003)
 
     def test_noisy_one_degree_plane_passes(self):
         # 回归：真实桌面约 1°，三点 RANSAC 预筛不应把它误判成倾斜。
@@ -210,8 +211,103 @@ class TableFitTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             table_fit.validate_model(broken)
 
+    def test_focus_window_ignores_a_larger_floor_plane(self):
+        # 大ROI里地板比桌子大得多；没有焦点时全局拟合会选中地板。
+        rng = np.random.default_rng(11)
+        xs = np.arange(-0.20, 2.00, 0.02)
+        ys = np.arange(-1.00, 1.00, 0.02)
+        grid_x, grid_y = np.meshgrid(xs, ys)
+        floor = np.stack([grid_x.ravel(), grid_y.ravel(),
+                          np.full(grid_x.size, -0.60)], axis=1)
+        floor[:, 2] += rng.normal(0.0, 0.0007, len(floor))
+        points = np.vstack([floor, table_points()])
+        lower = [-0.30, -1.20, -0.90]
+        upper = [2.10, 1.20, 0.50]
+        common = dict(
+            roi_min=lower, roi_max=upper, plane_threshold_m=0.006,
+            voxel_m=0.008, max_tilt_deg=3.0, min_inliers=300,
+            min_inlier_ratio=0.25, ransac_iterations=200)
+        global_model = table_fit.fit_table(points, **common)
+        self.assertLess(
+            table_fit.surface_z(global_model, 0.5, 0.0), -0.30,
+            "大ROI的全局拟合应当被地板主导（本测试的前提）")
+        focused = table_fit.fit_table(
+            points, focus_xyz=[0.50, -0.15, 0.08], focus_radius_m=0.30,
+            focus_down_m=0.30, focus_up_m=0.02, **common)
+        self.assertAlmostEqual(
+            table_fit.surface_z(focused, 0.5, 0.0), 0.0, delta=0.005)
+        self.assertEqual(focused["fit_scope"], "focus")
+
+    def test_footprint_radius_caps_stray_coplanar_points(self):
+        count = 40
+        stray = np.stack([
+            np.linspace(1.35, 1.55, count),
+            np.zeros(count),
+            np.zeros(count)], axis=1)
+        points = np.vstack([table_points(), stray])
+        common = dict(
+            roi_min=[0.20, -0.60, -0.20], roi_max=[1.70, 0.60, 0.50],
+            plane_threshold_m=0.006, voxel_m=0.008, max_tilt_deg=3.0,
+            min_inliers=300, min_inlier_ratio=0.25, ransac_iterations=200)
+        uncapped = table_fit.fit_table(points, **common)
+        self.assertGreater(uncapped["bounds_max"][0], 1.4)
+        capped = table_fit.fit_table(
+            points, focus_xyz=[0.55, 0.0, 0.05], footprint_radius_m=0.60,
+            **common)
+        self.assertLess(capped["bounds_max"][0], 1.30)
+
+    def test_footprint_top_is_the_plane_not_the_highest_inlier(self):
+        model = self.fit(scene_points())
+        # 瓶子和卡片远高于桌面，但桌面盒顶面只能高出平面 epsilon。
+        self.assertLessEqual(model["bounds_max"][2], 0.01)
+        self.assertGreaterEqual(model["bounds_max"][2], -0.002)
+
 
 class ObstacleModelTests(unittest.TestCase):
+    def test_wall_like_panel_is_not_a_card(self):
+        config = scan_config()
+        plane = {"rms": 0.001, "ratio": 0.99, "thickness": 0.004,
+                 "extent_u": 1.20, "extent_v": 1.00}
+        wall = {"plane": plane, "top_height": 1.20, "circle": None,
+                "height": 1.20}
+        self.assertEqual(obstacle_model.classify(wall, config), "unknown")
+        card = {"plane": {"rms": 0.001, "ratio": 0.99, "thickness": 0.004,
+                          "extent_u": 0.15, "extent_v": 0.20},
+                "top_height": 0.20, "circle": None, "height": 0.20}
+        self.assertEqual(obstacle_model.classify(card, config), "card")
+
+    @staticmethod
+    def cylinder(centroid):
+        return {
+            "kind": "cylinder", "centroid": np.asarray(centroid, dtype=float),
+            "circle": {"radius": 0.03, "center": None, "rms": 0.001},
+            "height": 0.17, "plane": {"ratio": 0.4},
+        }
+
+    def test_two_bottles_use_the_confident_detection_as_target(self):
+        config = scan_config()
+        descriptions = [
+            self.cylinder([0.50, 0.28, 0.085]),
+            self.cylinder([0.50, -0.30, 0.085]),
+        ]
+        detections = [
+            {"conf": 0.60, "surface_base": np.array([0.50, -0.31, 0.09])},
+            {"conf": 0.92, "surface_base": np.array([0.50, 0.27, 0.09])},
+        ]
+        self.assertEqual(
+            obstacle_model.choose_target(descriptions, config, detections), 0)
+
+    def test_ambiguous_bottles_are_refused(self):
+        config = scan_config()
+        descriptions = [
+            self.cylinder([0.50, 0.30, 0.085]),
+            self.cylinder([0.50, -0.30, 0.085]),
+        ]
+        detections = [{"conf": 0.90,
+                       "surface_base": np.array([0.50, 0.00, 0.09])}]
+        with self.assertRaisesRegex(RuntimeError, "无法用检测唯一确定"):
+            obstacle_model.choose_target(descriptions, config, detections)
+
     def build(self):
         config = scan_config()
         table = table_model()

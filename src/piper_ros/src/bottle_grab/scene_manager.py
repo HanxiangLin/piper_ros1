@@ -93,6 +93,51 @@ class SceneManager:
                 round(float(octomap.resolution), 6),
                 hashlib.sha256(payload).hexdigest())
 
+    def octomap_snapshot(self):
+        """Return the serialized octree for the scan artifact snapshot."""
+        scene = self._get(PlanningSceneComponents.OCTOMAP)
+        octomap = scene.world.octomap.octomap
+        if not octomap.data:
+            return None
+        payload = bytes((value & 255 for value in octomap.data))
+        frame = (scene.world.octomap.header.frame_id
+                 or octomap.header.frame_id).lstrip("/")
+        return {
+            "frame": frame,
+            "id": octomap.id,
+            "binary": bool(octomap.binary),
+            "resolution": float(octomap.resolution),
+            "data": np.frombuffer(payload, dtype=np.uint8).copy(),
+            "bytes": int(len(payload)),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+
+    def wait_octomap_quiet(self, quiet_s=1.0, timeout_s=20.0, poll_s=0.4):
+        """Block until the octomap stops changing.
+
+        The updater consumes published clouds asynchronously, so the next
+        scan-view motion must not be planned before the current view is fully
+        integrated.  Raises when the map keeps changing past ``timeout_s``.
+        """
+        quiet_s = float(quiet_s)
+        timeout_s = float(timeout_s)
+        if quiet_s < 0.0 or timeout_s <= 0.0:
+            raise ValueError("OctoMap稳定等待参数无效")
+        deadline = time.monotonic() + timeout_s
+        last = object()
+        last_change = time.monotonic()
+        while time.monotonic() < deadline:
+            current = self.octomap_signature()
+            if current != last:
+                last = current
+                last_change = time.monotonic()
+            elif time.monotonic() - last_change >= quiet_s:
+                return current
+            rospy.sleep(poll_s)
+        raise RuntimeError(
+            "OctoMap在%.1fs内未稳定；检查PointCloudOctomapUpdater是否在消费%s"
+            % (timeout_s, "点云"))
+
     def current_signature(self):
         """Hash of everything the planner is allowed to see right now."""
         scene = self._get(PlanningSceneComponents.OCTOMAP
@@ -189,7 +234,10 @@ class SceneManager:
         self.obstacles = list(scan_result["obstacles"])
         self.signature = self.current_signature()
         self.acm_before_task = self.get_acm()
-        rospy.loginfo("场景已冻结：桌面+目标瓶+%d个障碍", len(self.obstacles))
+        rospy.loginfo(
+            "场景已冻结：桌面+目标瓶+%d个语义障碍；OctoMap=%s",
+            len(self.obstacles),
+            "非空" if self.octomap_signature() is not None else "空")
 
     def refresh_signature(self):
         """Accept the current scene as the new reference.
@@ -264,9 +312,11 @@ class SceneManager:
             raise RuntimeError("场景table几何与扫描模型不一致")
         self.table_model = model
         rospy.loginfo(
-            "桌面已载入: x[%.3f,%.3f] y[%.3f,%.3f] 表面z=%.4f",
+            "桌面已载入: x[%.3f,%.3f] y[%.3f,%.3f] 表面z=%.4f 顶面=%.4f",
             lower[0], upper[0], lower[1], upper[1],
-            surface_z(model, 0.0, 0.0))
+            surface_z(model, 0.5 * (lower[0] + upper[0]),
+                      0.5 * (lower[1] + upper[1])),
+            upper[2])
 
     def set_obstacles(self, specs):
         objects = []
@@ -446,3 +496,16 @@ class SceneManager:
         valid, pairs = self.inspect_robot_state(robot_state)
         if not valid:
             raise RuntimeError("机器人状态无效/碰撞: " + str(pairs))
+
+    def validate_current_state(self):
+        """Raise unless the *current* robot state is collision free.
+
+        Called right after the static obstacle map is built: if the arm's own
+        base/fingers already overlap the map, every later plan would be
+        rejected, so this must fail early and loudly.
+        """
+        request = GetPlanningSceneRequest()
+        request.components.components = (
+            PlanningSceneComponents.ROBOT_STATE
+            | PlanningSceneComponents.ROBOT_STATE_ATTACHED_OBJECTS)
+        self.validate_robot_state(self.get_scene(request).scene.robot_state)
