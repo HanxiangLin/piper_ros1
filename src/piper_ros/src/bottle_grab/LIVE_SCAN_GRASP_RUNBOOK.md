@@ -149,7 +149,9 @@ $PY moveit_grab.py _params_file:=$BG/moveit_grab_params.yaml
 ```
 
 启动即开始动作：清场 → 抬臂 → 5 个偏航视点扫描（每视点直接建静态障碍地图）
-→ 冻结 → 抓取 → 放置 → 回零。
+→ 若首视点漏检卡片则用全部视点融合点云补检 → 冻结 → 抓取 → 放置 → 回零。
+扫描期间窗口 `Scan Views` 会逐视点显示相机画面并标注 `view N/5`，全部采完后
+换成 2x3 拼图，4 个侧视点的覆盖情况也能一眼确认。
 预计抓取开始前 60~90 秒（每个视点约 6~8 秒 + 地图稳定 1~2 秒），放置再加 20~30 秒。
 
 扫描阶段的碰撞场景现在是：
@@ -211,9 +213,13 @@ $PY moveit_grab.py _params_file:=$BG/moveit_grab_params.yaml \
 $PY moveit_grab.py _params_file:=$BG/moveit_grab_params.yaml \
   _scan_mode:=semantic
 
-# 关掉 OpenCV 检测窗口
+# 关掉 OpenCV 检测窗口和扫描视点窗口
 $PY moveit_grab.py _params_file:=$BG/moveit_grab_params.yaml \
-  _show_detection_window:=false
+  _show_detection_window:=false _show_scan_windows:=false
+
+# 只关扫描视点窗口（"Scan Views"：每视点画面 + 结束时拼图）
+$PY moveit_grab.py _params_file:=$BG/moveit_grab_params.yaml \
+  _show_scan_windows:=false
 ```
 
 如果不想开 RViz，终端 1 改用：
@@ -425,7 +431,7 @@ $PY moveit_grab.py _params_file:=$PARAMS _dry_run:=true
 | `桌面拟合` 日志里 `范围global`（而不是 `范围focus`） | 第一视点没拿到瓶子检测点，RANSAC 退化到全局；大 ROI 下可能拟合到地板。先解决 YOLO 检测 |
 | `未找到圆柱形目标瓶` | 点太少/聚类太碎：`_scan_min_cluster_points:=20`；或 `_scan_min_depth:=0.20` |
 | `存在多个圆柱候选且无法用检测唯一确定目标` | 桌上有多个瓶子且YOLO分数接近：加 `_target_bottle_label:=bottle-g`（y/g/b），或移走多余瓶子 |
-| `扫描未识别出卡片` | `_scan_card_min_extent:=0.08`，或把卡片立正一点；卡片必须是立在支撑面上（`scan_card_max_top_height`） |
+| `扫描未识别出卡片` | 程序已用全部视点融合点云补检过一次。先看上方 `卡片诊断`：`extent` 太小试 `_scan_card_min_extent:=0.08`；`top` 超限说明卡片立得太斜（`_scan_card_max_top_height`）；`ratio`/`thick` 不达标说明卡片被粘住或弯了，把卡片单独立好 |
 | `目标瓶在多视点融合中丢失` | 某个视点看不到瓶子：`_scan_joint1_offsets:="[0.0,0.35,-0.35]"` |
 | `物体接触区域靠近table边界` | 松手点在**已观测到的**支撑面之外（现在 footprint 以瓶子为中心 0.6m）：缩小 `_place_offset_from_card`，或把扫描视点/ROI 调到能看到卡片外侧桌面 |
 | `没有可行的接近走廊` | 日志里会写“被哪个 id 挡住、净距多少”；调 `_scan_corridor_radius:=0.04` |

@@ -401,6 +401,84 @@ def _describe_groups(groups, table, config, labels=None):
     return descriptions
 
 
+def obstacle_descriptions(points, table, config):
+    """Segment + cluster + describe a cloud without selecting a target.
+
+    ``build`` couples the card search to target selection, so it cannot be
+    reused when the first view missed the card but the target is already
+    known.  This helper only answers "what stands on the table?".
+    """
+    clearance = max(float(config.scan_table_clearance), 0.0)
+    obstacle_points = segment(
+        points, table, clearance=clearance,
+        footprint_margin=float(config.scan_footprint_margin))
+    if len(obstacle_points) == 0:
+        return []
+    groups = cluster(obstacle_points, config.scan_cluster_voxel_m,
+                     config.scan_min_cluster_points)
+    return _describe_groups(groups, table, config)
+
+
+def _card_score(description):
+    """Rank plate candidates: the real card is the largest, densest plate."""
+    plane = description["plane"]
+    return (description["points"],
+            float(plane["extent_u"]) * float(plane["extent_v"]))
+
+
+def find_card(points, table, config, target_center=None):
+    """Return a card model from a (fused) cloud, or ``None``.
+
+    This is the late-detection path for ``scan_mode=map``: the first view may
+    see the bottle in front of the card, splitting it into two slivers that are
+    each too small to classify.  The later views' points are already in the
+    fused cloud, so re-running the shape classification once at the end
+    recovers the full card without any extra motion.
+
+    It never selects a target and never raises when the bottle is missing; the
+    target cylinder is *not* carved out (that would cut the card again when
+    the bottle stands right in front of it).
+    """
+    cards = [item for item in obstacle_descriptions(points, table, config)
+             if item["kind"] == "card"]
+    if target_center is not None:
+        max_distance = float(getattr(
+            config, "scan_card_max_distance_from_target", 0.0))
+        if max_distance > 0.0:
+            center = np.asarray(target_center, dtype=float)
+            cards = [
+                item for item in cards
+                if float(np.linalg.norm(
+                    item["plane"]["center"][:2] - center[:2])) <= max_distance]
+    if not cards:
+        return None
+    return _card_dict(max(cards, key=_card_score))
+
+
+def card_diagnostics(points, table, config, target_center=None):
+    """Describe every candidate cluster, for explaining a missed card."""
+    try:
+        descriptions = obstacle_descriptions(points, table, config)
+    except RuntimeError as error:
+        return ["聚类失败: %s" % error]
+    if not descriptions:
+        return ["桌面以上没有可用簇（检查scan_min_obstacle_height/点云）"]
+    center = None if target_center is None else np.asarray(
+        target_center, dtype=float)
+    lines = []
+    for index, item in enumerate(descriptions):
+        plane = item["plane"]
+        distance = "n/a" if center is None else "%.3f" % float(
+            np.linalg.norm(item["centroid"][:2] - center[:2]))
+        lines.append(
+            "簇%d kind=%s n=%d rms=%.4f ratio=%.2f thick=%.4f "
+            "extent=%.3fx%.3f top=%.3f dist=%s"
+            % (index, item["kind"], item["points"], plane["rms"],
+               plane["ratio"], plane["thickness"], plane["extent_u"],
+               plane["extent_v"], item["top_height"], distance))
+    return lines
+
+
 # ----------------------------------------------------------------------
 # Collision-object specs.
 # ----------------------------------------------------------------------

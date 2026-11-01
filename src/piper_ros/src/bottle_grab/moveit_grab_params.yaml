@@ -55,6 +55,9 @@ cartesian_joint_step_limit: 0.15
 # 正值绕base Z逆时针偏转。程序会规划全部候选并按关节代价选最小。
 approach_yaw_offsets_deg: [0.0, 15.0, -15.0, 30.0, -30.0]
 show_detection_window: true
+# 每个扫描视点采集时都显示相机画面（窗口"Scan Views"）；全部采完后再显示
+# 一张2x3拼图，方便确认5个视点都覆盖到了工作区。需要桌面环境。
+show_scan_windows: true
 # null代表任意颜色，可选bottle-y、bottle-g、bottle-b。
 target_bottle_label: null
 
@@ -155,6 +158,9 @@ scan_card_min_extent: 0.10
 scan_card_max_thickness: 0.03
 # 卡片必须立在支撑面上：离桌面最高的簇顶高度上限（防止大ROI里的墙面板被当成卡片）。
 scan_card_max_top_height: 0.30
+# 首视点漏检卡片时，用全部视点融合点云补检；补检到的卡片离目标瓶超过这个
+# 水平距离就拒绝（0=不限制），防止侧视把远处板子当成卡片。
+scan_card_max_distance_from_target: 0.80
 # 圆柱：拟合半径/高度与参数瓶子一致。
 scan_cylinder_radius_tol: 0.6
 scan_cylinder_height_tol: 0.5

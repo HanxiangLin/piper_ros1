@@ -329,6 +329,49 @@ class ObstacleModelTests(unittest.TestCase):
         self.assertEqual(result["obstacles"][0]["label"], "card")
         self.assertTrue(any("目标瓶" in line for line in summary))
 
+    def test_find_card_recovers_a_card_split_by_the_bottle(self):
+        config = scan_config()
+        table = table_model()
+        target = np.array([0.50, -0.15, 0.085])
+        # 视点0：瓶子挡在卡片中间，卡片被深度间断切成左右两块，
+        # 每块都小于 scan_card_min_extent，单独不可能被判成卡片。
+        occluded = card_points()
+        occluded = occluded[np.abs(occluded[:, 1] - 0.15) > 0.03]
+        first_view = np.vstack([
+            table_points(), bottle_points(), occluded])
+        self.assertIsNone(obstacle_model.find_card(
+            first_view, table, config, target_center=target))
+
+        # 后续视点从侧面补上被挡住的部分；融合点云里是一整张卡片。
+        fused = np.vstack([first_view, card_points()])
+        card = obstacle_model.find_card(
+            fused, table, config, target_center=target)
+        self.assertIsNotNone(card)
+        self.assertAlmostEqual(card["center"][0], 0.50, delta=0.01)
+        self.assertAlmostEqual(card["center"][1], 0.15, delta=0.01)
+        sizes = sorted([card["width"], card["length"]])
+        np.testing.assert_allclose(sizes, [0.15, 0.20], atol=0.03)
+
+    def test_find_card_returns_none_without_a_card(self):
+        points = np.vstack([table_points(), bottle_points()])
+        self.assertIsNone(obstacle_model.find_card(
+            points, table_model(), scan_config()))
+
+    def test_find_card_respects_the_top_height_limit(self):
+        config = scan_config(scan_card_max_top_height=0.10)
+        points = np.vstack([
+            table_points(), bottle_points(), card_points()])
+        self.assertIsNone(obstacle_model.find_card(
+            points, table_model(), config))
+
+    def test_find_card_can_reject_a_far_card(self):
+        config = scan_config(scan_card_max_distance_from_target=0.10)
+        points = np.vstack([
+            table_points(), bottle_points(), card_points()])
+        self.assertIsNone(obstacle_model.find_card(
+            points, table_model(), config,
+            target_center=np.array([0.50, -0.15, 0.085])))
+
     def test_card_box_is_a_proper_rotation(self):
         result, _ = self.build()
         pose = result["obstacles"][0]["pose"]

@@ -19,6 +19,11 @@ In ``scan_mode=map`` (default) the collision scene is:
 * the static OctoMap built from every scan view, which contains **everything
   else** the camera saw -- desk, walls, cabinets, other bottles.
 
+The card is normally classified from the first view.  If that view cannot see
+enough of it (for example the bottle stands in front and splits it into two
+slivers), it is re-detected once from the fully fused cloud before freezing;
+no extra motion is required.
+
 The final snapshot is frozen into ``SceneManager``; afterwards every motion
 verifies that the scene did not change.
 """
@@ -74,6 +79,9 @@ class ScanTask:
             raise ValueError("scan_mode必须是map/semantic/both")
         self.map_mode = config.scan_mode in MAP_MODES
         self.semantic_obstacles = config.scan_mode in ("semantic", "both")
+        # 每个视点的相机画面都显示；全部视点采完后再显示一张拼图。
+        self.show_scan_windows = bool(
+            getattr(config, "show_scan_windows", False))
         self._cloud_pub = None
         if self.map_mode:
             self._cloud_pub = rospy.Publisher(
@@ -198,15 +206,46 @@ class ScanTask:
                     fused.last_view_points(), transform, stamp, table,
                     target_center, index)
 
+        self._show_scan_sheet(images)
         if table is None:
             raise RuntimeError("扫描没有产生桌面模型")
         self._require_final_table_tilt(table)
-        if self.config.enable_place and self.config.place_mode == "card" \
-                and card is None:
+        needs_card = (self.config.enable_place
+                      and self.config.place_mode == "card")
+        if needs_card and card is None:
+            # map 模式后续视点只精修目标瓶，不会重新分类卡片。视点0可能因为
+            # 瓶子挡在卡片前把卡片切成两块而漏检；此时全部视点的点云都已融合，
+            # 再用同一份融合点云补检一次，不需要额外运动。
+            rospy.loginfo(
+                ">>> 首视点未识别卡片，用%d个视点的融合点云补检",
+                fused.view_count)
+            card = obstacle_model.find_card(
+                points, table, self.config, target_center=target_center)
+            if card is not None:
+                rospy.loginfo(
+                    ">>> 卡片补检成功: center=(%.3f,%.3f,%.3f) "
+                    "%.0fx%.0fcm 厚%.0fmm",
+                    card["center"][0], card["center"][1], card["center"][2],
+                    card["width"] * 100.0, card["length"] * 100.0,
+                    card["thickness"] * 1000.0)
+                summary = [line for line in summary
+                           if not line.startswith("卡片:")]
+                summary.append(
+                    "卡片(融合补检): center=(%.3f,%.3f,%.3f) "
+                    "%.0fx%.0fcm 厚%.0fmm"
+                    % (card["center"][0], card["center"][1], card["center"][2],
+                       card["width"] * 100.0, card["length"] * 100.0,
+                       card["thickness"] * 1000.0))
+        if needs_card and card is None:
+            for line in obstacle_model.card_diagnostics(
+                    points, table, self.config, target_center=target_center):
+                rospy.logerr("卡片诊断: %s", line)
             raise RuntimeError(
-                "扫描未识别出卡片，无法执行放置；检查卡片是否被遮挡或换视点")
-        if card is not None and self.config.enable_place \
-                and self.config.place_mode == "card":
+                "扫描未识别出卡片（已用%d个视点融合点云补检），无法执行放置；"
+                "检查卡片是否被遮挡、是否立得太斜或超出扫描ROI；"
+                "详见上一条“卡片诊断”"
+                % fused.view_count)
+        if card is not None and needs_card:
             self._check_card_clearance(card)
         if self.map_mode:
             self._verify_map()
@@ -253,7 +292,7 @@ class ScanTask:
         reference = self.joint_feedback._fresh_joint_positions()
         frames = []
         color_image = None
-        for _ in range(self.config.scan_frames_per_view):
+        for frame_index in range(self.config.scan_frames_per_view):
             frameset = self.camera.frames(timeout_ms=5000)
             aligned = self.camera.align.process(frameset)
             raw_depth = aligned.get_depth_frame()
@@ -270,6 +309,8 @@ class ScanTask:
                 depth_max=self.config.scan_max_range)
             frames.append(points)
             color_image = np.asanyarray(color_frame.get_data()).copy()
+            # 每个视点、每一帧都刷新同一个窗口，操作者能看到扫描覆盖了哪里。
+            self._show_scan_frame(color_image, index, frame_index)
             rospy.sleep(self.config.scan_frame_interval)
         measured = self.joint_feedback._fresh_joint_positions()
         drift = max(abs(measured[name] - reference[name])
@@ -296,6 +337,60 @@ class ScanTask:
         if stamp.to_sec() <= 0.0:
             stamp = rospy.Time.now()
         return base_frames, color_image, transform, stamp
+
+    # ------------------------------------------------------------------
+    # On-screen feedback.
+    # ------------------------------------------------------------------
+    def _view_label(self, index):
+        views = self._view_offsets()
+        if not views:
+            return "view %d" % (index + 1)
+        offset1, offset2 = views[min(index, len(views) - 1)]
+        return "view %d/%d  j1%+.0f  j2%+.0f deg" % (
+            index + 1, len(views), math.degrees(offset1),
+            math.degrees(offset2))
+
+    @staticmethod
+    def _put_scan_label(image, text):
+        cv2.rectangle(image, (0, 0), (image.shape[1], 28),
+                      (0, 0, 0), -1)
+        cv2.putText(image, text, (8, 20), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55, (0, 255, 0), 1, cv2.LINE_AA)
+
+    def _show_scan_frame(self, image, index, frame_index=None):
+        if not self.show_scan_windows or image is None:
+            return
+        display = image.copy()
+        text = self._view_label(index)
+        if frame_index is not None:
+            text += "  frame %d/%d" % (
+                frame_index + 1, self.config.scan_frames_per_view)
+        self._put_scan_label(display, text)
+        cv2.imshow("Scan Views", display)
+        cv2.waitKey(1)
+
+    def _show_scan_sheet(self, images):
+        """Show all captured views at once as a contact sheet."""
+        if not self.show_scan_windows:
+            return
+        images = list(images or [])
+        if not any(image is not None for image in images):
+            return
+        width, height = 320, 240
+        columns = min(3, len(images))
+        rows = int(math.ceil(len(images) / float(columns)))
+        sheet = np.zeros((rows * height, columns * width, 3), dtype=np.uint8)
+        for index, image in enumerate(images):
+            if image is None:
+                continue
+            row, column = divmod(index, columns)
+            tile = cv2.resize(image, (width, height),
+                              interpolation=cv2.INTER_AREA)
+            self._put_scan_label(tile, self._view_label(index))
+            sheet[row * height:(row + 1) * height,
+                  column * width:(column + 1) * width] = tile
+        cv2.imshow("Scan Views", sheet)
+        cv2.waitKey(1)
 
     # ------------------------------------------------------------------
     # Detection / fitting / publishing.

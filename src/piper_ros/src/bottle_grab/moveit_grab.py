@@ -169,6 +169,10 @@ class PiperVisionController:
             raise ValueError("~target_bottle_label必须是bottle-y/g/b或null")
         cfg.show_detection_window = bool(rospy.get_param(
             "~show_detection_window", SHOW_DETECTION_WINDOW))
+        # 每个扫描视点都显示相机画面；全部采完后显示一张拼图。
+        # 默认跟随检测窗口开关，无桌面环境时两个一起关。
+        cfg.show_scan_windows = bool(rospy.get_param(
+            "~show_scan_windows", cfg.show_detection_window))
         cfg.support_edge_margin = finite_float(
             "~support_edge_margin", minimum=0.0)
         cfg.lift_clearance = finite_float(
@@ -351,6 +355,11 @@ class PiperVisionController:
         cfg.scan_card_max_top_height = finite_float(
             "~scan_card_max_top_height", 0.30, minimum=0.05, maximum=1.0,
             strict_min=True)
+        # 首视点漏检卡片时用融合点云补检；补检到的卡片离目标瓶超过这个
+        # 水平距离就拒绝（0=不限制），防止侧视把远处板子当成卡片。
+        cfg.scan_card_max_distance_from_target = finite_float(
+            "~scan_card_max_distance_from_target", 0.80,
+            minimum=0.0, maximum=2.0)
         # ---------------- 静态障碍地图 ----------------
         cfg.scan_map_cloud_voxel = finite_float(
             "~scan_map_cloud_voxel", 0.015, minimum=0.0, maximum=0.10,

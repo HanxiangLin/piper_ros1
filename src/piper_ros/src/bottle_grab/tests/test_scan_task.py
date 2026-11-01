@@ -70,6 +70,7 @@ def scan_config(root):
         scan_card_min_extent=0.10,
         scan_card_max_thickness=0.03,
         scan_card_max_top_height=0.30,
+        scan_card_max_distance_from_target=0.80,
         scan_cylinder_radius_tol=0.6,
         scan_cylinder_height_tol=0.5,
         scan_non_target_cylinder=True,
@@ -89,7 +90,7 @@ def scan_config(root):
     )
 
 
-def scene_cloud():
+def scene_cloud(include_card=True):
     rng = np.random.default_rng(7)
     xs = np.arange(0.30, 0.80, 0.006)
     ys = np.arange(-0.30, 0.30, 0.006)
@@ -112,7 +113,10 @@ def scene_cloud():
         np.full(grid_cy.size, 0.50),
         grid_cy.ravel(),
         grid_cz.ravel()], axis=1)
-    return np.vstack([table, bottle, card])
+    parts = [table, bottle]
+    if include_card:
+        parts.append(card)
+    return np.vstack(parts)
 
 
 class ScanTaskTests(unittest.TestCase):
@@ -246,7 +250,7 @@ class ScanTaskTests(unittest.TestCase):
 
     def test_missing_card_aborts_before_freeze(self):
         task, state, arm, scene, detector, root = self.build()
-        table_only = scene_cloud()[:12000]
+        table_only = scene_cloud(include_card=False)
         task._capture = MagicMock(
             return_value=([table_only], None, np.eye(4), None))
         with patch.object(scan_task_module.obstacle_model, "build",
@@ -262,19 +266,60 @@ class ScanTaskTests(unittest.TestCase):
                 task.execute()
         scene.freeze.assert_not_called()
 
+    def test_scan_windows_show_every_view(self):
+        task, *_ = self.build()
+        task.show_scan_windows = True
+        images = [np.zeros((48, 64, 3), dtype=np.uint8) for _ in range(5)]
+        with patch.object(scan_task_module.cv2, "imshow") as imshow, \
+                patch.object(scan_task_module.cv2, "waitKey"):
+            task._show_scan_frame(images[0], 0, 0)
+            task._show_scan_sheet(images)
+        self.assertEqual(imshow.call_count, 2)
+        self.assertEqual(imshow.call_args_list[0][0][0], "Scan Views")
+        sheet = imshow.call_args_list[1][0][1]
+        # 5个视点按 3列x2行 拼成一张图。
+        self.assertEqual(sheet.shape, (2 * 240, 3 * 320, 3))
+
+    def test_map_mode_recovers_card_from_the_fused_cloud(self):
+        task, state, arm, scene, detector, root = self.build()
+        # 复现 map 模式的关键分支：只有视点0调用 build()，后续视点只精修
+        # 目标瓶。关掉地图发布，避免为了测卡片补检再mock一遍OctoMap。
+        task.config.scan_mode = "map"
+        task.map_mode = False
+        task.semantic_obstacles = False
+        frames = [scene_cloud()]
+        task._capture = MagicMock(
+            return_value=(frames, None, np.eye(4), None))
+        built, lines = self.built(card=False)
+        with patch.object(scan_task_module.obstacle_model, "build",
+                          return_value=(built, lines)):
+            result = task.execute()
+
+        # 视点0的 build() 没找到卡片，但全部视点融合点云里有；
+        # 补检必须成功，而不是在 freeze 之前中止。
+        self.assertIsNotNone(result["card"])
+        self.assertIsNotNone(state.card_model)
+        self.assertAlmostEqual(result["card"]["center"][1], 0.15, delta=0.01)
+        scene.freeze.assert_called_once()
+        scene.set_obstacles.assert_not_called()
+
     @staticmethod
-    def built(center_y=-0.15):
+    def built(center_y=-0.15, card=True):
+        card_model = None
+        if card:
+            card_model = {
+                "center": np.array([0.50, 0.15, 0.10]),
+                "normal": np.array([-1.0, 0.0, 0.0]),
+                "u": np.array([0.0, 1.0, 0.0]),
+                "v": np.array([0.0, 0.0, 1.0]),
+                "width": 0.20, "length": 0.15, "thickness": 0.005,
+                "points": 100}
         return ({
             "target": {"center": np.array([0.50, center_y, 0.085]),
                        "radius": 0.03, "height": 0.17,
                        "measured_radius": 0.03, "measured_height": 0.17,
                        "points": 100, "label": None},
-            "card": {"center": np.array([0.50, 0.15, 0.10]),
-                     "normal": np.array([-1.0, 0.0, 0.0]),
-                     "u": np.array([0.0, 1.0, 0.0]),
-                     "v": np.array([0.0, 0.0, 1.0]),
-                     "width": 0.20, "length": 0.15, "thickness": 0.005,
-                     "points": 100},
+            "card": card_model,
             "obstacles": [], "clusters": []}, ["stub"])
 
     def test_target_jump_between_views_is_rejected(self):
