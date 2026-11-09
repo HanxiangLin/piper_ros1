@@ -12,6 +12,14 @@ vision experiments.
 Generated catkin directories such as `build/`, `devel/`, and `logs/` are kept
 locally and excluded from Git.
 
+## Force-controlled grasping
+
+`src/piper_ros/src/bottle_grab` supports an RPPS-200 10x20 tactile sensor on
+the inner side of one gripper finger.  The target normal force is set by
+`grasp_force_n` (default 8 N) and closed-loop controlled; see
+[`FORCE_CONTROL.md`](src/piper_ros/src/bottle_grab/FORCE_CONTROL.md).
+The vendor calibration export lives in `calibration/rpps200/`.
+
 ## Model files
 
 The local file

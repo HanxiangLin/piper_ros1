@@ -315,6 +315,10 @@ class PlaceTask:
 
     def release_bottle_and_retract(self, pre_place):
         """Open the gripper, detach the bottle, update the world, retract."""
+        # 松手前先确认力控仍健康；传感器故障时保持夹持，不释放。
+        self.gripper.assert_force_healthy()
+        # 先停止运输保压，避免松爪过程中保压线程又发闭合指令。
+        self.gripper.stop_force_hold()
         bottle_actual = (
             self.arm.current_ee_matrix() @ self.state.T_link6_bottle)
         # 松手点离真实桌面只有几毫米，但table碰撞盒取的是整块桌面最高点

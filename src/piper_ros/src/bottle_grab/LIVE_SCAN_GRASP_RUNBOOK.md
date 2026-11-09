@@ -125,6 +125,11 @@ rosparam get /robot_description_kinematics/arm/kinematics_solver_timeout
 
 # 4.8 成功率测试阶段先确认 dry_run 为 true
 grep -E "^dry_run:" $PARAMS
+
+# 4.9 力控传感器（未接传感器时跳过；对应 force_control: false）
+$PY rpps200_monitor.py --list
+$PY rpps200_monitor.py --duration 3
+grep -E "^(force_control|grasp_force_n|rpps_)" $PARAMS
 ```
 
 如果 4.1 有输出，先关掉那个终端的相机节点；如果是别的用户启动的：
@@ -262,11 +267,31 @@ done
 
 测完把参数文件里的 `dry_run` 改回 `false`，或正式运行时不要加 `_dry_run:=true`。
 
+### 5.3 力控抓取（RPPS-200）
+
+`force_control: true` 时程序启动就会打开传感器；没接好会直接报错，不会静默退化成
+开环。先按 4.9 跑通 `rpps200_monitor.py`，再正式运行。目标力可直接命令行覆盖：
+
+```bash
+cd $BG
+$PY moveit_grab.py _params_file:=$BG/moveit_grab_params.yaml _grasp_force_n:=12.0
+```
+
+暂时不接传感器、只跑旧流程：
+
+```bash
+$PY moveit_grab.py _params_file:=$BG/moveit_grab_params.yaml _force_control:=false
+```
+
+完整的参数、标定、故障处理见 [`FORCE_CONTROL.md`](FORCE_CONTROL.md)。
+
 ---
 
 ## 6. 正常运行的日志顺序
 
 ```text
+力控标定: rpps200_10x20_calibration.csv: 10x20, 偏移15.0kPa, 有效通道200/200 ...
+力控传感器已连接: /dev/ttyACM0 @ 2000000 8N1
 RealSense初始化完成；depth scale=...
 正在加载YOLO瓶子检测模型: ...
 YOLO模型加载完成
@@ -288,6 +313,11 @@ YOLO模型加载完成
 扫描结果: 桌面平面 z=... / 目标瓶 ... / 障碍物 0 个 / 卡片 ...
 场景已冻结：桌面+目标瓶+0个语义障碍；OctoMap=非空
 >>> 开始MoveIt视觉抓取任务
+>>> 闭合夹爪并控制夹持力
+力控: 零点标定完成，标定前力x.xxN
+力控闭合完成: 力x.xxN 开口x.xxxxm 接触开口x.xxxxm 步数NN
+力控夹持稳定: force=x.xxN target=8.00N opening=x.xxxxm
+力控: 保压已启动，目标8.00N
 ...
 ```
 

@@ -16,6 +16,7 @@ sibling modules:
   grasp_corridor                                   (pure scan geometry)
 - camera / detector / hand_eye                     (SDK / calibration)
 - joint_feedback / arm_controller / gripper_controller / scene_manager
+- rpps200 / force_control                          (tactile force control)
 - scan_task / grasp_task / place_task              (business orchestration)
 """
 
@@ -53,9 +54,11 @@ from camera import (
     RealSenseCamera,
 )
 from detector import BottleDetector
+from force_control import ForceControlConfig
 from grasp_task import GraspTask
 from gripper_controller import GripperController
 from hand_eye import HandEyeCalibration
+from rpps200 import RPPS200Calibration, RPPS200Sensor
 from joint_feedback import ARM_JOINTS, FINGER_JOINTS, JointFeedback  # noqa: F401
 from param_utils import finite_float, numeric_list
 from place_task import PlaceTask
@@ -94,6 +97,9 @@ DEFAULT_CALIBRATION_PATH = str(
     / "calibration/eye_in_hand_d435i/session_02/result.json")
 DEFAULT_ARTIFACT_ROOT = str(
     Path(__file__).resolve().parents[4] / "calibration/bottle_grasp_scan")
+DEFAULT_FORCE_CALIBRATION_PATH = str(
+    Path(__file__).resolve().parents[4]
+    / "calibration/rpps200/rpps200_10x20_calibration.csv")
 
 # None 表示抓取任意检测到的瓶子；也可以改成 "bottle-y"、"bottle-g"、"bottle-b"
 TARGET_BOTTLE_LABEL = None
@@ -124,6 +130,8 @@ class PiperVisionController:
         )
         self.arm_controller = None
         self.joint_feedback = None
+        self.force_sensor = None
+        self.force_config = None
         self.camera = None
         self.scan_task = None
         self.grasp_task = None
@@ -226,6 +234,76 @@ class PiperVisionController:
             strict_min=True)
         cfg.gripper_settle_time = finite_float(
             "~gripper_settle_time", minimum=0.0, maximum=10.0)
+
+        # ---------------- 力控（RPPS-200） ----------------
+        cfg.force_control = bool(rospy.get_param("~force_control", True))
+        cfg.grasp_force_n = finite_float(
+            "~grasp_force_n", 8.0, minimum=0.5, maximum=20.0)
+        tolerance_default = min(1.0, max(0.2, cfg.grasp_force_n * 0.2))
+        cfg.grasp_force_tolerance_n = finite_float(
+            "~grasp_force_tolerance_n", tolerance_default,
+            minimum=0.1, maximum=5.0)
+        max_default = min(
+            20.0, cfg.grasp_force_n + max(2.0, cfg.grasp_force_n * 0.5))
+        cfg.grasp_force_max_n = finite_float(
+            "~grasp_force_max_n", max_default, minimum=0.5, maximum=20.0)
+        min_default = max(0.2, cfg.grasp_force_n * 0.4)
+        cfg.grasp_force_min_n = finite_float(
+            "~grasp_force_min_n", min_default, minimum=0.1, maximum=20.0)
+        if cfg.grasp_force_tolerance_n >= cfg.grasp_force_n:
+            raise ValueError("~grasp_force_tolerance_n 必须小于目标力")
+        if cfg.grasp_force_max_n < cfg.grasp_force_n:
+            raise ValueError("~grasp_force_max_n 不能小于目标力")
+        if cfg.grasp_force_min_n >= cfg.grasp_force_n:
+            raise ValueError("~grasp_force_min_n 必须小于目标力")
+        cfg.rpps_port = str(rospy.get_param("~rpps_port", ""))
+        cfg.rpps_baud = int(rospy.get_param("~rpps_baud", 2000000))
+        if not 9600 <= cfg.rpps_baud <= 4000000:
+            raise ValueError("~rpps_baud 必须在9600～4000000内")
+        cfg.rpps_calibration = str(rospy.get_param(
+            "~rpps_calibration", DEFAULT_FORCE_CALIBRATION_PATH))
+        cfg.rpps_taxel_area_mm2 = finite_float(
+            "~rpps_taxel_area_mm2", 2.25, minimum=0.01, maximum=1000.0,
+            strict_min=True)
+        cfg.rpps_force_scale = finite_float(
+            "~rpps_force_scale", 1.0, minimum=0.001, maximum=1000.0,
+            strict_min=True)
+        cfg.rpps_sensor_timeout = finite_float(
+            "~rpps_sensor_timeout", 0.5, minimum=0.05, maximum=5.0,
+            strict_min=True)
+        cfg.rpps_tare_frames = int(rospy.get_param("~rpps_tare_frames", 30))
+        if not 3 <= cfg.rpps_tare_frames <= 500:
+            raise ValueError("~rpps_tare_frames 必须在3～500内")
+        cfg.force_step_coarse_m = finite_float(
+            "~force_step_coarse_m", 0.001, minimum=0.00005,
+            maximum=0.005, strict_min=True)
+        cfg.force_step_fine_m = finite_float(
+            "~force_step_fine_m", 0.0002, minimum=0.00002,
+            maximum=0.001, strict_min=True)
+        if cfg.force_step_coarse_m < cfg.force_step_fine_m:
+            raise ValueError("~force_step_coarse_m 不能小于 ~force_step_fine_m")
+        cfg.force_settle_time = finite_float(
+            "~force_settle_time", 0.10, minimum=0.02, maximum=1.0,
+            strict_min=True)
+        cfg.force_max_squeeze_m = finite_float(
+            "~force_max_squeeze_m", 0.008, minimum=0.001, maximum=0.03,
+            strict_min=True)
+        cfg.force_hold_period = finite_float(
+            "~force_hold_period", 0.15, minimum=0.05, maximum=1.0,
+            strict_min=True)
+        cfg.force_hold_step_m = finite_float(
+            "~force_hold_step_m", 0.0001, minimum=0.00002, maximum=0.001,
+            strict_min=True)
+        cfg.force_hold_deadband_n = finite_float(
+            "~force_hold_deadband_n", 0.5, minimum=0.05, maximum=3.0,
+            strict_min=True)
+        cfg.force_max_steps = int(rospy.get_param("~force_max_steps", 300))
+        if not 10 <= cfg.force_max_steps <= 2000:
+            raise ValueError("~force_max_steps 必须在10～2000内")
+        if (cfg.force_control
+                and not Path(cfg.rpps_calibration).expanduser().is_file()):
+            raise ValueError(
+                "力控已启用但标定文件不存在: " + cfg.rpps_calibration)
 
         # ---------------- 扫描参数 ----------------
         cfg.scan_mode = str(rospy.get_param("~scan_mode", "map"))
@@ -541,13 +619,48 @@ class PiperVisionController:
             self.robot, self.tf_buffer, self.planning_scene,
             support_edge_margin=cfg.support_edge_margin,
             voxel_size=cfg.scan_voxel_m)
+
+        force_sensor = None
+        force_config = None
+        if cfg.force_control:
+            calibration = RPPS200Calibration.load(cfg.rpps_calibration)
+            rospy.loginfo("力控标定: %s", calibration.summary())
+            force_sensor = RPPS200Sensor(
+                calibration, port=cfg.rpps_port, baud=cfg.rpps_baud,
+                area_mm2=cfg.rpps_taxel_area_mm2,
+                force_scale=cfg.rpps_force_scale,
+                contact_kpa=1.0,
+                sensor_timeout=cfg.rpps_sensor_timeout)
+            port, baud = force_sensor.start()
+            rospy.loginfo("力控传感器已连接: %s @ %d 8N1", port, baud)
+            force_config = ForceControlConfig(
+                target_n=cfg.grasp_force_n,
+                tolerance_n=cfg.grasp_force_tolerance_n,
+                max_n=cfg.grasp_force_max_n,
+                min_n=cfg.grasp_force_min_n,
+                contact_n=max(0.05, min(0.5, cfg.grasp_force_n * 0.1)),
+                coarse_step_m=cfg.force_step_coarse_m,
+                fine_step_m=cfg.force_step_fine_m,
+                settle_s=cfg.force_settle_time,
+                max_squeeze_m=cfg.force_max_squeeze_m,
+                min_opening_m=cfg.grasp_opening_min,
+                max_opening_m=cfg.opening_open,
+                hold_period_s=cfg.force_hold_period,
+                hold_step_m=cfg.force_hold_step_m,
+                hold_deadband_n=cfg.force_hold_deadband_n,
+                sensor_timeout_s=cfg.rpps_sensor_timeout,
+                max_steps=cfg.force_max_steps)
+        self.force_sensor = force_sensor
+        self.force_config = force_config
+
         self.gripper = GripperController(
             self.joint_feedback, self.scene_manager, gripper_service,
             self.state, cfg.gripper_effort,
             cfg.gripper_tolerance, cfg.gripper_feedback_timeout,
             cfg.gripper_settle_time, cfg.grasp_opening_min,
             cfg.grasp_opening_max, cfg.grasp_effort_min,
-            cfg.grasp_check_service)
+            cfg.grasp_check_service,
+            force_sensor=force_sensor, force_config=force_config)
         self.arm_controller = ArmController(
             move_group, self.robot, self.scene_manager, self.joint_feedback,
             self.display_pub, self.state,
@@ -641,12 +754,22 @@ class PiperVisionController:
                         for parent, child, _ in missing))
 
     def run(self):
+        if (self.gripper is not None
+                and self.gripper.force_control_enabled is True):
+            rospy.loginfo(
+                "力控已启用: 目标%.2fN 容差±%.2fN 上限%.2fN 下限%.2fN",
+                self.force_config.target_n, self.force_config.tolerance_n,
+                self.force_config.max_n, self.force_config.min_n)
         self.camera.start()
         self.detector.load()
         self.scan_task.execute()
         self.grasp_task.execute_vision_grasp()
 
     def close(self):
+        if getattr(self, "gripper", None) is not None:
+            self.gripper.stop_force_hold()
+        if self.force_sensor is not None:
+            self.force_sensor.stop()
         if self.arm_controller is not None:
             self.arm_controller.arm.stop()
             self.arm_controller.arm.clear_pose_targets()

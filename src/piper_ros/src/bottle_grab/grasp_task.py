@@ -336,9 +336,19 @@ class GraspTask:
         rospy.loginfo(">>> 碰撞检查下直线接近瓶子")
         self.arm.move_cartesian(T_grasp)
 
-        rospy.loginfo(">>> 闭合夹爪并检查实测开口")
-        self.gripper.command(
-            self.config.opening_close_command, wait_for_target=False)
+        rospy.loginfo(">>> 闭合夹爪并控制夹持力")
+        if self.gripper.force_control_enabled is True:
+            # 夹爪已张开且尚未接触瓶子；此时采集空载基线最可靠。
+            self.gripper.tare_force_sensor()
+            result = self.gripper.grasp_with_force()
+            rospy.loginfo(
+                ">>> 力控闭合结果: force=%.2fN opening=%.4fm "
+                "contact_opening=%.4fm steps=%d",
+                result.force_n, result.opening_m,
+                result.contact_opening_m, result.steps)
+        else:
+            self.gripper.command(
+                self.config.opening_close_command, wait_for_target=False)
         self.gripper.confirm()
         base_bottle = np.eye(4)
         base_bottle[:3, 3] = self.state.bottle_center_at_grasp
@@ -352,6 +362,9 @@ class GraspTask:
         self.scene.refresh_signature()
         # 维持显式指尖接触权限；touch_links负责附着物与指尖关系。
         self.state.grasp_confirmed = True
+        # 抬升前启动运输保压；传感器掉线/力超限会在后续检查点中止。
+        self.gripper.start_force_hold()
+        self.gripper.assert_force_healthy()
 
         start_ee = self.arm.current_ee_matrix()
         lift_target = start_ee.copy()
@@ -378,7 +391,11 @@ class GraspTask:
 
         rospy.loginfo(">>> 携带瓶子沿base Z提升")
         self.arm.move_cartesian(lift_target)
-        self.gripper.confirm()
+        if self.gripper.force_control_enabled is True:
+            # 保压线程在持续调节；这里只确认没有超限/掉力，不用再等稳定窗口。
+            self.gripper.assert_force_healthy()
+        else:
+            self.gripper.confirm()
         actual_lift = self.arm.current_ee_matrix()[2, 3] - start_ee[2, 3]
         bottle_bottom = (
             self.state.bottle_center_at_grasp[2]
@@ -403,6 +420,7 @@ class GraspTask:
             # 会让整条手臂挤在桌面高度，直线下降很容易被卡片/桌面截断。
             rospy.loginfo(">>> 抓取完成，先回零位再放置")
             self.arm.move_joints(self.config.home_joint_target)
+        self.gripper.assert_force_healthy()
         self.place_task.execute_place()
         if self.config.enable_place:
             rospy.loginfo(">>> 放置完成，回到零位")

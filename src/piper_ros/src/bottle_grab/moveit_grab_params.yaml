@@ -29,6 +29,7 @@ lift_clearance: 0.03
 # 完整夹爪开口(m)；joint7/joint8各为开口的一半。
 gripper_opening_open: 0.07
 gripper_opening_close_command: 0.0
+# 力控模式下这是驱动器力矩上限（0.5～2.0），不是目标力；目标力见 grasp_force_n。
 gripper_effort: 1.0
 # 闭合后实测开口范围与负载阈值，按真实瓶子/夹指/驱动反馈校验。
 # 要求：闭合目标 < min < max < 张开目标。
@@ -42,6 +43,35 @@ grasp_check_service: ""
 gripper_tolerance: 0.004
 gripper_feedback_timeout: 4.0
 gripper_settle_time: 1.5
+
+# ================= 力控（RPPS-200，单侧） =================
+# true=必须连接传感器并闭环；暂时不接传感器、只跑旧流程时改为 false。
+force_control: true
+# 单侧法向力目标(N)。闭环按传感器实测力停止，不是 gripper_effort 的换算值。
+grasp_force_n: 8.0
+grasp_force_tolerance_n: 1.0
+grasp_force_max_n: 12.0
+grasp_force_min_n: 4.0
+# 空=自动扫描 /dev/ttyACM*、/dev/ttyUSB*；也可写 /dev/serial/by-id/...
+rpps_port: ""
+rpps_baud: 2000000
+rpps_calibration: /home/hank/piper_ws/calibration/rpps200/rpps200_10x20_calibration.csv
+# 10x20感应区30x15mm/200点 -> 节距1.5mm -> 2.25mm^2。
+# 用已知重量复核后，把 rpps_force_scale 调成 已知重量N/显示力N。
+rpps_taxel_area_mm2: 2.25
+rpps_force_scale: 1.0
+rpps_sensor_timeout: 0.5
+rpps_tare_frames: 30
+# 闭合步长(m)/每步等待(s)/相对接触点的最大压缩量(m)：先粗后精。
+force_step_coarse_m: 0.001
+force_step_fine_m: 0.0002
+force_settle_time: 0.10
+force_max_squeeze_m: 0.008
+# 运输保压：每0.15s最多调0.1mm，力死区0.5N。
+force_hold_period: 0.15
+force_hold_step_m: 0.0001
+force_hold_deadband_n: 0.5
+force_max_steps: 300
 
 velocity_scale: 0.03
 acceleration_scale: 0.03

@@ -474,19 +474,12 @@ class C_PiperRosNode():
         response.code = 15999
         response.status = False
         if(self.gripper_exist):
-            rospy.loginfo(f"-----------------------Gripper---------------------------")
-            rospy.loginfo(f"Received request:")
-            rospy.loginfo(f"PS: Piper should be enable.Please ensure piper is enable")
-            rospy.loginfo(f"gripper_angle:{req.gripper_angle}, range is [0m, 0.07m]")
-            rospy.loginfo(f"gripper_effort:{req.gripper_effort},range is [0.5N/m, 2N/m]")
-            rospy.loginfo(f"gripper_code:{req.gripper_code}, range is [0, 1, 2, 3]\n \
-                            0x00: Disable\n \
-                            0x01: Enable\n \
-                            0x03/0x02: Enable and clear error / Disable and clear error")
-            rospy.loginfo(f"set_zero:{req.set_zero}, range is [0, 0xAE] \n \
-                            0x00: Invalid value \n \
-                            0xAE: Set zero point")
-            rospy.loginfo(f"-----------------------Gripper---------------------------")
+            # 力控保压会以几Hz反复调用本服务；这里必须限频，否则日志会拖慢控制。
+            rospy.loginfo_throttle(
+                1.0,
+                "Gripper request: angle=%.4fm effort=%.2f code=%d set_zero=%d",
+                req.gripper_angle, req.gripper_effort,
+                req.gripper_code, req.set_zero)
             gripper_angle = req.gripper_angle
             gripper_angle = round(max(0, min(req.gripper_angle, 0.07)) * 1e6)
             gripper_effort = req.gripper_effort
@@ -508,7 +501,9 @@ class C_PiperRosNode():
             rospy.logwarn("gripper_exist param is False.")
             response.code = 15903
             response.status = False
-        rospy.loginfo(f"Returning GripperResponse: {response.code}, {response.status}")
+        rospy.loginfo_throttle(
+            1.0, "Gripper response: code=%d status=%s",
+            response.code, response.status)
         return response
     
     def handle_enable_service(self,req):
