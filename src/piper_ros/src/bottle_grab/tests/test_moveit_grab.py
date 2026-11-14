@@ -781,6 +781,48 @@ class MoveItGrabTests(unittest.TestCase):
                 math.atan2(math.sin(azimuth - expected),
                            math.cos(azimuth - expected)), 0.0, places=9)
 
+    def test_candidates_support_top_down_approach(self):
+        task, task_state, arm, gripper, scene, jf, place = self.grasp_task(
+            config={'approach_mode': 'top'})
+        observed = np.eye(4)
+        observed[:3, 3] = [0.62, -0.08, 0.18]
+        candidates = task._candidates(observed)
+        self.assertEqual([c["label"] for c in candidates], [0.0, 30.0])
+        for candidate in candidates:
+            rotation = candidate["grasp"][:3, :3]
+            # 接近方向固定朝下
+            np.testing.assert_allclose(
+                rotation[:, 2], [0.0, 0.0, -1.0], atol=1e-9)
+            self.assertAlmostEqual(np.linalg.det(rotation), 1.0, places=9)
+            # 预抓取点在抓取点正上方，水平位置不变
+            self.assertGreater(candidate["start"][2], candidate["end"][2])
+            self.assertAlmostEqual(
+                candidate["start"][0], candidate["end"][0], places=9)
+            self.assertAlmostEqual(
+                candidate["start"][1], candidate["end"][1], places=9)
+
+    def test_top_tilt_moves_pregrasp_up_and_inward(self):
+        task, task_state, arm, gripper, scene, jf, place = self.grasp_task(
+            config={'approach_mode': 'top', 'approach_tilt_deg': 45.0})
+        observed = np.eye(4)
+        observed[:3, 3] = [0.62, -0.08, 0.18]
+        candidates = task._candidates(observed)
+        self.assertEqual([c["label"] for c in candidates], [0.0, 30.0])
+        for candidate in candidates:
+            rotation = candidate["grasp"][:3, :3]
+            self.assertAlmostEqual(
+                float(rotation[2, 2]), -math.cos(math.radians(45.0)),
+                places=9)
+            self.assertAlmostEqual(
+                float(np.linalg.norm(rotation[:2, 2])),
+                math.sin(math.radians(45.0)), places=9)
+            start = candidate["start"]
+            end = candidate["end"]
+            self.assertGreater(start[2], end[2])
+            self.assertLess(
+                math.hypot(start[0], start[1]),
+                math.hypot(end[0], end[1]))
+
     def test_candidate_cost_penalizes_wrist_twist(self):
         task, task_state, arm, gripper, scene, jf, place = self.grasp_task()
         arm.joint_limit_margins.return_value = [1.0] * 6

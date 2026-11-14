@@ -77,6 +77,19 @@ class GraspTest(unittest.TestCase):
         self.assertGreater(result.steps, 10)
         self.assertTrue(result.within_tolerance)
 
+    def test_pad_offset_is_reported_not_used_for_control(self):
+        model = GripperModel()
+        ctl = controller(model, config(pad_offset_m=0.0055))
+        result = ctl.grasp()
+        self.assertAlmostEqual(
+            result.pad_opening_m, result.opening_m + 0.0055, places=9)
+        self.assertAlmostEqual(
+            result.contact_pad_opening_m,
+            result.contact_opening_m + 0.0055, places=9)
+        # 控制本身仍按滑块开口闭环，偏移不改变落点。
+        self.assertGreaterEqual(result.opening_m, 0.051)
+        self.assertLessEqual(result.opening_m, 0.053)
+
     def test_no_contact_reopens_and_raises(self):
         model = GripperModel(contact=0.030)
         ctl = controller(model)

@@ -56,7 +56,7 @@ source /opt/ros/noetic/setup.bash
 source $WS/devel/setup.bash
 
 roslaunch piper_with_gripper_moveit piper_real.launch \
-  can_port:=can0 auto_enable:=false use_rviz:=true
+  can_port:=can0 auto_enable:=true use_rviz:=true
 ```
 
 - `auto_enable:=false` 不会自动请求电机使能。需要运动前先使能：

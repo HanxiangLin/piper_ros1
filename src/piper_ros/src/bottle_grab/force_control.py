@@ -42,6 +42,10 @@ class ForceControlConfig:
     sensor_timeout_s: float = 0.5
     max_steps: int = 300
     stable_cycles: int = 3
+    # 关节/滑块开口到真实指垫内表面间距的固定偏移(m)。
+    # URDF 指垫面相对滑块基准面内缩约2mm/侧，实物橡胶垫再增加约0.7mm/侧；
+    # 这里只用于日志显示，不参与任何控制或安全判断。
+    pad_offset_m: float = 0.0
 
     def __post_init__(self):
         values = {
@@ -60,6 +64,7 @@ class ForceControlConfig:
             "hold_step_m": self.hold_step_m,
             "hold_deadband_n": self.hold_deadband_n,
             "sensor_timeout_s": self.sensor_timeout_s,
+            "pad_offset_m": self.pad_offset_m,
         }
         for name, value in values.items():
             if not math.isfinite(float(value)):
@@ -88,6 +93,8 @@ class ForceControlConfig:
             raise ValueError("力控最大步数至少为10")
         if self.stable_cycles < 1:
             raise ValueError("稳定周期至少为1")
+        if self.pad_offset_m < 0.0:
+            raise ValueError("指垫偏移必须不小于0")
 
 
 @dataclass
@@ -97,6 +104,8 @@ class ForceGraspResult:
     contact_opening_m: float
     steps: int
     within_tolerance: bool
+    pad_opening_m: float = 0.0
+    contact_pad_opening_m: float = 0.0
 
 
 class ForceGraspController:
@@ -148,6 +157,14 @@ class ForceGraspController:
             raise ForceControlError("夹爪开口反馈不是有限值")
         return value
 
+    def _opening_text(self, opening: float) -> str:
+        """Format a slider opening, adding the physical pad gap when known."""
+        offset = float(self.config.pad_offset_m)
+        if offset > 0.0:
+            return "开口%.4fm(指垫%.4fm)" % (
+                float(opening), float(opening) + offset)
+        return "开口%.4fm" % float(opening)
+
     def _send(self, opening: float) -> float:
         value = min(self.config.max_opening_m,
                     max(self.config.min_opening_m, float(opening)))
@@ -177,14 +194,15 @@ class ForceGraspController:
         start = self._opening()
         if start < config.min_opening_m - 1e-9:
             raise ForceControlError(
-                "夹爪起始开口%.4fm小于最小开口%.4fm"
-                % (start, config.min_opening_m))
+                "夹爪起始%s小于最小开口%.4fm"
+                % (self._opening_text(start), config.min_opening_m))
         self._upper = start
         self._lower = config.min_opening_m
         self._command_opening = start
         self._log(
-            "力控闭合: 目标%.2fN 容许±%.2fN 上限%.2fN 起始开口%.4fm"
-            % (config.target_n, config.tolerance_n, config.max_n, start))
+            "力控闭合: 目标%.2fN 容许±%.2fN 上限%.2fN 起始%s"
+            % (config.target_n, config.tolerance_n, config.max_n,
+               self._opening_text(start)))
 
         opening = start
         steps = 0
@@ -203,7 +221,8 @@ class ForceGraspController:
             steps += 1
             force = self.force_now()
             if steps % 5 == 0:
-                self._log("粗闭合: 开口%.4fm 力%.2fN" % (opening, force))
+                self._log("粗闭合: %s 力%.2fN"
+                          % (self._opening_text(opening), force))
             if force >= config.contact_n or force >= config.max_n:
                 contact_opening = opening
                 break
@@ -211,15 +230,18 @@ class ForceGraspController:
         if contact_opening is None:
             self._send(start)
             raise ForceControlError(
-                "闭合到最小开口%.4fm仍未检测到接触（阈值%.2fN），"
-                "拒绝继续挤压" % (config.min_opening_m, config.contact_n))
+                "闭合到最小%s仍未检测到接触（阈值%.2fN），"
+                "拒绝继续挤压"
+                % (self._opening_text(config.min_opening_m),
+                   config.contact_n))
 
         self._contact_opening = contact_opening
         self._lower = max(config.min_opening_m,
                           contact_opening - config.max_squeeze_m)
         self._log(
-            "检测到接触: 开口%.4fm 力%.2fN；允许继续压缩到%.4fm"
-            % (contact_opening, force, self._lower))
+            "检测到接触: %s 力%.2fN；允许继续压缩到%s"
+            % (self._opening_text(contact_opening), force,
+               self._opening_text(self._lower)))
 
         if force > config.max_n:
             opening, force, steps = self._backoff(opening, force, steps)
@@ -264,8 +286,8 @@ class ForceGraspController:
                 new_opening = min(self._upper, opening + trim_step)
             if abs(new_opening - opening) < 1e-9:
                 self._warn(
-                    "力控已到行程边界: 开口%.4fm 力%.2fN 目标%.2fN"
-                    % (opening, force, config.target_n))
+                    "力控已到行程边界: %s 力%.2fN 目标%.2fN"
+                    % (self._opening_text(opening), force, config.target_n))
                 break
             opening = self._send(new_opening)
             self._sleep(config.settle_s)
@@ -275,8 +297,8 @@ class ForceGraspController:
                 opening, force, steps = self._backoff(
                     opening, force, steps)
             if steps % 10 == 0:
-                self._log("精调: 开口%.4fm 力%.2fN 步长%.5fm"
-                          % (opening, force, trim_step))
+                self._log("精调: %s 力%.2fN 步长%.5fm"
+                          % (self._opening_text(opening), force, trim_step))
 
         force = self.force_now()
         self._last_force = force
@@ -289,15 +311,20 @@ class ForceGraspController:
         within = abs(force - config.target_n) <= config.tolerance_n
         if not within:
             raise ForceControlError(
-                "夹持力%.2fN未进入目标%.2f±%.2fN（开口%.4fm）"
-                % (force, config.target_n, config.tolerance_n, opening))
+                "夹持力%.2fN未进入目标%.2f±%.2fN（%s）"
+                % (force, config.target_n, config.tolerance_n,
+                   self._opening_text(opening)))
         self._log(
-            "力控闭合完成: 力%.2fN 开口%.4fm 接触开口%.4fm 步数%d"
-            % (force, opening, contact_opening, steps))
+            "力控闭合完成: 力%.2fN %s 接触%s 步数%d"
+            % (force, self._opening_text(opening),
+               self._opening_text(contact_opening), steps))
+        offset = float(config.pad_offset_m)
         return ForceGraspResult(
             force_n=force, opening_m=opening,
             contact_opening_m=contact_opening, steps=steps,
-            within_tolerance=within)
+            within_tolerance=within,
+            pad_opening_m=float(opening) + offset,
+            contact_pad_opening_m=float(contact_opening) + offset)
 
     def _backoff(self, opening: float, force: float, steps: int):
         config = self.config
@@ -309,8 +336,8 @@ class ForceGraspController:
             self._sleep(config.settle_s)
             steps += 1
             force = self.force_now()
-            self._warn("夹持力超上限，回退到开口%.4fm 力%.2fN"
-                       % (opening, force))
+            self._warn("夹持力超上限，回退到%s 力%.2fN"
+                       % (self._opening_text(opening), force))
         if force > config.max_n:
             raise ForceControlError(
                 "夹持力%.2fN超过安全上限%.2fN，且已无法继续张开"
@@ -340,8 +367,8 @@ class ForceGraspController:
                     "夹持力%.2fN超过上限%.2fN且夹爪已全开"
                     % (force, config.max_n))
             self._send(new_opening)
-            self._warn("保压: 力%.2fN超上限，张开到%.4fm"
-                       % (force, new_opening))
+            self._warn("保压: 力%.2fN超上限，张开到%s"
+                       % (force, self._opening_text(new_opening)))
             return self.force_now()
 
         if force < config.min_n:
@@ -351,8 +378,8 @@ class ForceGraspController:
                     "夹持力%.2fN低于下限%.2fN且已到最小开口"
                     % (force, config.min_n))
             self._send(new_opening)
-            self._warn("保压: 力%.2fN低于下限，闭合到%.4fm"
-                       % (force, new_opening))
+            self._warn("保压: 力%.2fN低于下限，闭合到%s"
+                       % (force, self._opening_text(new_opening)))
             return self.force_now()
 
         error = config.target_n - force
@@ -366,8 +393,8 @@ class ForceGraspController:
         if abs(new_opening - opening) < 1e-9:
             if force < config.target_n - config.tolerance_n:
                 raise ForceControlError(
-                    "夹持力%.2fN无法继续增加（开口%.4fm）"
-                    % (force, opening))
+                    "夹持力%.2fN无法继续增加（%s）"
+                    % (force, self._opening_text(opening)))
             return force
         self._send(new_opening)
         return self.force_now()
@@ -379,7 +406,7 @@ class ForceGraspController:
                 and not config.min_opening_m - 1e-9
                 <= self._command_opening <= config.max_opening_m + 1e-9):
             raise ForceControlError(
-                "保压指令开口%.4fm超出范围" % self._command_opening)
+                "保压指令%s超出范围" % self._opening_text(self._command_opening))
         if force < config.min_n:
             raise ForceControlError(
                 "夹持力%.2fN低于下限%.2fN" % (force, config.min_n))

@@ -3,6 +3,15 @@
 本文对应 `moveit_grab.py` 的 **单侧 RPPS-200、0–20 N、默认 8 N、闭环 + 运输保压** 版本。
 不接传感器时把 `force_control` 设为 `false`，程序回到原来的“固定开口 + `gripper_effort`”流程。
 
+本文中的 Python 命令统一使用工作空间虚拟环境：
+
+```bash
+export WS=/home/hank/piper_ws
+export BG=$WS/src/piper_ros/src/bottle_grab
+export PY=$WS/.venv-vision/bin/python
+cd "$BG"
+```
+
 ## 1. 它到底控制什么
 
 - 控制量：传感器一侧的**法向力** `F = Σ(p_i × A_taxel)`，单位 N。
@@ -27,10 +36,10 @@ sudo usermod -aG dialout $USER   # 重新登录后生效
 ls -l /dev/ttyACM* /dev/ttyUSB*
 ```
 
-安装依赖（机器人上的 Python 3）：
+安装依赖到 `.venv-vision`（若该环境尚未安装）：
 
 ```bash
-python3 -m pip install pyserial
+$PY -m pip install pyserial
 ```
 
 注意：厂商 Windows 上位机不要和 ROS 同时占用同一个串口。
@@ -39,10 +48,10 @@ python3 -m pip install pyserial
 
 ```bash
 cd ~/piper_ws/src/piper_ros/src/bottle_grab
-python3 rpps200_monitor.py --list
-python3 rpps200_monitor.py --port /dev/ttyACM0
+$PY rpps200_monitor.py --list
+$PY rpps200_monitor.py --port /dev/ttyACM0
 # 或自动扫描：
-python3 rpps200_monitor.py
+$PY rpps200_monitor.py
 ```
 
 正常应看到 `fps≈100`，空载 `F≈0 N`。把已知重量（例如 500 g 砝码 + 平板）
@@ -91,7 +100,7 @@ calibration/rpps200/rpps200_10x20_calibration.csv
 示例：命令行临时把目标改成 12 N（私有参数优先于 YAML）：
 
 ```bash
-python3 moveit_grab.py _params_file:=/home/hank/piper_ws/src/piper_ros/src/bottle_grab/moveit_grab_params.yaml _grasp_force_n:=12.0
+$PY moveit_grab.py _params_file:=$BG/moveit_grab_params.yaml _grasp_force_n:=12.0
 ```
 
 ## 5. 闭环流程
@@ -112,6 +121,11 @@ python3 moveit_grab.py _params_file:=/home/hank/piper_ws/src/piper_ros/src/bottl
    或传感器超时立即置故障并停止保压。
 7. **松手**：`place_task` 先 `assert_force_healthy()`，再停止保压，最后张开。
    任何力控故障都会在抬升/放置/松手前中止，**保持当前夹持，不自动松开**。
+
+> **开口坐标说明**：日志里的“开口”是 `joint7-joint8` 的滑块间距，不是
+> 指垫内表面间距。物理间距 ≈ 该值 + `gripper_pad_offset_m`（本机实测
+> 5.5mm：URDF 指垫面相对滑块基准面内缩约 2mm/侧，实物橡胶垫再约
+> 0.7mm/侧）。该偏移**只用于日志显示**，不参与力控、限位或安全判断。
 
 ## 6. 故障与安全
 
@@ -145,8 +159,8 @@ rosservice call /gripper_srv "{gripper_angle: 0.07, gripper_effort: 1.0, gripper
 
 ```bash
 cd ~/piper_ws/src/piper_ros/src/bottle_grab
-python3 -m unittest discover -s tests -p 'test_rpps200.py' -v
-python3 -m unittest discover -s tests -p 'test_force_control.py' -v
+$PY -m unittest discover -s tests -p 'test_rpps200.py' -v
+$PY -m unittest discover -s tests -p 'test_force_control.py' -v
 ```
 
 ## 9. 已知限制

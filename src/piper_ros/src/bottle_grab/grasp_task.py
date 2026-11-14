@@ -23,7 +23,11 @@ from moveit_msgs.srv import GetPlanningSceneRequest
 
 from grasp_corridor import filter_by_corridor
 from joint_feedback import ARM_JOINTS
-from pose_utils import level_grasp_rotation_for_azimuth, pose_from_matrix
+from pose_utils import (
+    level_grasp_rotation_for_azimuth,
+    pose_from_matrix,
+    top_grasp_rotation_for_azimuth,
+)
 from scene_manager import TARGET_BOTTLE_ID
 
 
@@ -52,6 +56,22 @@ class GraspTask:
     # ------------------------------------------------------------------
     # Grasp target construction and candidate planning.
     # ------------------------------------------------------------------
+    def _nominal_rotation(self, azimuth):
+        """Return the 0-degree grasp rotation for the configured approach.
+
+        ``side`` keeps the historical radial approach (gripper Z horizontal);
+        ``top`` approaches from above, optionally tilted towards the robot by
+        ``approach_tilt_deg`` so the wrist stays inside the arm's reach when the
+        object is far from the base (0 degrees = straight down).
+        """
+        mode = str(getattr(self.config, "approach_mode", "side"))
+        if mode == "top":
+            return top_grasp_rotation_for_azimuth(
+                azimuth, getattr(self.config, "approach_tilt_deg", 0.0))
+        if mode != "side":
+            raise ValueError("approach_mode必须是side/top")
+        return level_grasp_rotation_for_azimuth(azimuth)
+
     def _grasp_point(self, observed_bottle):
         """Return ``(grasp_pos, bottle_center)`` in base_link.
 
@@ -76,7 +96,7 @@ class GraspTask:
         grasp_pos, center = self._grasp_point(observed_bottle)
         azimuth = math.atan2(grasp_pos[1], grasp_pos[0])
         tool = np.eye(4)
-        tool[:3, :3] = level_grasp_rotation_for_azimuth(azimuth)
+        tool[:3, :3] = self._nominal_rotation(azimuth)
         tool[:3, 3] = grasp_pos
         approach_axis = tool[:3, 2]
         pre_tool = tool.copy()
@@ -97,7 +117,7 @@ class GraspTask:
         """
         grasp_pos, _ = self._grasp_point(observed_bottle)
         azimuth = math.atan2(grasp_pos[1], grasp_pos[0])
-        nominal_rotation = level_grasp_rotation_for_azimuth(azimuth)
+        nominal_rotation = self._nominal_rotation(azimuth)
         inverse_tool = np.linalg.inv(self.config.T_link6_tool)
         candidates = []
         for yaw_deg in self.config.approach_yaws:
@@ -290,7 +310,7 @@ class GraspTask:
         results.sort(key=lambda item: item[0])
         cost, candidate, pre_trajectory, details = results[0]
         rospy.loginfo(
-            "选择候选: 水平偏转%+.1f度 代价%.3f "
+            "选择候选: 偏转%+.1f度 代价%.3f "
             "(路径%.2f 接近%.2f 腕部%.2f 限位%.4f) 净距%.3fm；"
             "有效候选%d/%d",
             candidate["label"], cost, details["path"],
@@ -308,7 +328,11 @@ class GraspTask:
     # Full grasp workflow.
     # ------------------------------------------------------------------
     def execute_vision_grasp(self):
-        rospy.loginfo(">>> 开始MoveIt视觉抓取任务")
+        mode = str(getattr(self.config, "approach_mode", "side"))
+        rospy.loginfo(
+            ">>> 开始MoveIt视觉抓取任务（接近方式: %s，倾角: %.0f°）",
+            mode, (float(getattr(self.config, "approach_tilt_deg", 0.0))
+                   if mode == "top" else 0.0))
         self.joint_feedback.wait_for_joint_feedback()
         observed = getattr(self.state, "T_base_bottle", None)
         if observed is None:
@@ -342,10 +366,11 @@ class GraspTask:
             self.gripper.tare_force_sensor()
             result = self.gripper.grasp_with_force()
             rospy.loginfo(
-                ">>> 力控闭合结果: force=%.2fN opening=%.4fm "
-                "contact_opening=%.4fm steps=%d",
-                result.force_n, result.opening_m,
-                result.contact_opening_m, result.steps)
+                ">>> 力控闭合结果: force=%.2fN 开口=%.4fm(指垫%.4fm) "
+                "接触开口=%.4fm(指垫%.4fm) steps=%d",
+                result.force_n, result.opening_m, result.pad_opening_m,
+                result.contact_opening_m, result.contact_pad_opening_m,
+                result.steps)
         else:
             self.gripper.command(
                 self.config.opening_close_command, wait_for_target=False)
@@ -420,12 +445,17 @@ class GraspTask:
             # 会让整条手臂挤在桌面高度，直线下降很容易被卡片/桌面截断。
             rospy.loginfo(">>> 抓取完成，先回零位再放置")
             self.arm.move_joints(self.config.home_joint_target)
-        self.gripper.assert_force_healthy()
-        self.place_task.execute_place()
-        if self.config.enable_place:
+            self.gripper.assert_force_healthy()
+            self.place_task.execute_place()
             rospy.loginfo(">>> 放置完成，回到零位")
             self.arm.move_joints(self.config.home_joint_target)
         elif self.state.grasp_confirmed:
+            # 只抓不放：抬升后先回零位，再停止程序；夹爪保持最后一条力控
+            # 闭合指令（程序退出不会自动松爪）。
+            rospy.loginfo(">>> 抓取完成，回到零位并保持夹持（不放置）")
+            self.arm.move_joints(self.config.home_joint_target)
+            self.gripper.assert_force_healthy()
             rospy.logwarn(
-                "抓取提升完成；瓶子仍作为AttachedCollisionObject附着在link6，"
-                "未放置也未回零")
+                "抓取提升并回零完成；物体仍作为AttachedCollisionObject附着在link6，"
+                "夹持力%.2fN，未放置；程序退出后夹爪保持当前开口/力矩",
+                self.gripper.measured_force_n())

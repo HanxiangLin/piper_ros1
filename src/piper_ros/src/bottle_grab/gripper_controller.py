@@ -36,7 +36,8 @@ class GripperController:
                  state, gripper_effort, gripper_tolerance,
                  gripper_feedback_timeout, gripper_settle_time,
                  grasp_opening_min, grasp_opening_max, grasp_effort_min,
-                 grasp_check_service, force_sensor=None, force_config=None):
+                 grasp_check_service, force_sensor=None, force_config=None,
+                 pad_offset_m=None):
         self.joint_feedback = joint_feedback
         self.scene_manager = scene_manager
         self.gripper_service = gripper_service
@@ -49,6 +50,10 @@ class GripperController:
         self.grasp_opening_max = grasp_opening_max
         self.grasp_effort_min = grasp_effort_min
         self.grasp_check_service = grasp_check_service
+        # 仅用于日志显示：滑块开口 -> 真实指垫内表面间距的固定偏移。
+        if pad_offset_m is None:
+            pad_offset_m = getattr(force_config, "pad_offset_m", 0.0)
+        self.pad_offset_m = float(pad_offset_m)
 
         self._service_lock = threading.RLock()
         self._hold_stop = threading.Event()
@@ -103,6 +108,17 @@ class GripperController:
     def force_control_enabled(self):
         return self.force_controller is not None
 
+    def opening_text(self, opening):
+        """把滑块开口格式化成“关节开口 + 真实指垫间距”。
+
+        偏移只用于显示；控制指令、限位和碰撞检查仍然使用 joint7-joint8
+        的滑块坐标。
+        """
+        if self.pad_offset_m > 0.0:
+            return "开口%.4fm(指垫%.4fm)" % (
+                float(opening), float(opening) + self.pad_offset_m)
+        return "开口%.4fm" % float(opening)
+
     # ------------------------------------------------------------------
     # Low-level service calls.
     # ------------------------------------------------------------------
@@ -152,8 +168,8 @@ class GripperController:
         opening = self.current_opening()
         if opening < 0.065:
             raise RuntimeError(
-                "力控零点标定要求夹爪空载张开(>=0.065m)，当前只有%.4fm；"
-                "请先清空夹爪并手动张开" % opening)
+                "力控零点标定要求夹爪空载张开(>=0.065m)，当前只有%s；"
+                "请先清空夹爪并手动张开" % self.opening_text(opening))
         # 等机械臂/夹爪的残余振动衰减，再采空载基线。
         rospy.sleep(0.2)
         pre_force = self.force_controller.tare()
@@ -215,8 +231,9 @@ class GripperController:
                                 raise RuntimeError(
                                     "外部夹持检查失败: " + reply.message)
                         rospy.loginfo(
-                            "力控夹持稳定: force=%.2fN target=%.2fN "
-                            "opening=%.4fm", force, config.target_n, opening)
+                            "力控夹持稳定: force=%.2fN target=%.2fN %s",
+                            force, config.target_n,
+                            self.opening_text(opening))
                         return
                 else:
                     stable_since = None
@@ -225,11 +242,11 @@ class GripperController:
             previous = (opening, force)
             rospy.sleep(0.05)
         raise RuntimeError(
-            "力控夹持未稳定在目标%.2f±%.2fN（当前%.2fN，开口%.4fm）；"
+            "力控夹持未稳定在目标%.2f±%.2fN（当前%.2fN，%s）；"
             "不附着、不提升"
             % (config.target_n, config.tolerance_n,
                self._last_force_n if self._last_force_n is not None
-               else float("nan"), self.current_opening()))
+               else float("nan"), self.opening_text(self.current_opening())))
 
     def _confirm_opening_effort(self):
         """Require a stable opening inside the grasp band with real load."""
@@ -252,8 +269,8 @@ class GripperController:
                         if not reply.success:
                             raise RuntimeError("外部夹持检查失败: " + reply.message)
                     rospy.loginfo(
-                        "开口/负载稳定，夹持检查通过: opening=%.4fm effort=%.3f",
-                        opening, effort)
+                        "开口/负载稳定，夹持检查通过: %s effort=%.3f",
+                        self.opening_text(opening), effort)
                     return
             else:
                 stable_since = None

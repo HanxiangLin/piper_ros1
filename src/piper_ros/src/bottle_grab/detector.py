@@ -27,10 +27,15 @@ CONF_THRES = 0.5
 class BottleDetector:
     """Loads YOLO and turns color/depth frames into detection candidates."""
 
-    def __init__(self, model_path, imgsz=IMG_SIZE, conf_thres=CONF_THRES):
+    def __init__(self, model_path, imgsz=IMG_SIZE, conf_thres=CONF_THRES,
+                 require_color=True):
         self.model_path = model_path
         self.imgsz = imgsz
         self.conf_thres = conf_thres
+        # True：按框内HSV归入bottle-y/g/b，未命中三色则丢弃（旧行为）。
+        # False：直接使用YOLO类别名（例如cylinder），用于只识别形状、
+        # 颜色不在三色范围内的权重。
+        self.require_color = bool(require_color)
         self.model = None
 
     def load(self):
@@ -62,13 +67,21 @@ class BottleDetector:
         if results and results[0].boxes is not None:
             boxes = results[0].boxes.xyxy.cpu().numpy().astype(int)
             confidences = results[0].boxes.conf.cpu().numpy()
+            if getattr(self, "require_color", True):
+                class_ids = None
+            else:
+                class_ids = results[0].boxes.cls.cpu().numpy().astype(int)
+                names = getattr(self.model, "names", None) or {}
             height, width = color_image.shape[:2]
-            for box, confidence in zip(boxes, confidences):
+            for index, (box, confidence) in enumerate(zip(boxes, confidences)):
                 x1, y1, x2, y2 = box.tolist()
                 x1, x2 = np.clip([x1, x2], 0, width - 1)
                 y1, y2 = np.clip([y1, y2], 0, height - 1)
-                label = classify_bottle_color(
-                    color_image, x1, y1, x2, y2)
+                if class_ids is None:
+                    label = classify_bottle_color(
+                        color_image, x1, y1, x2, y2)
+                else:
+                    label = names.get(int(class_ids[index]), "object")
                 cx = int((x1 + x2) // 2)
                 cy = int((y1 + y2) // 2)
                 distance = get_depth_percentile(

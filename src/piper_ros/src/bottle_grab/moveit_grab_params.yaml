@@ -3,21 +3,25 @@
 #
 # 本版本不再需要离线 table_model.json，也不再需要手工开关静态扫描门：
 # 程序启动后会清空上一次的场景，抬起机械臂，用三个视点扫描工作区，
-# 运行时拟合桌面、分离目标瓶与其他障碍，然后冻结场景并抓取+放置。
-model_path: /home/hank/piper_ws/src/piper_ros/src/bottle_grab/bottle.pt
+# 运行时拟合桌面、分离目标物体与其他障碍，然后冻结场景并抓取（可选放置）。
+model_path: /home/hank/piper_ws/src/piper_ros/src/bottle_grab/cylinder.pt
 hand_eye_calibration: /home/hank/piper_ws/calibration/eye_in_hand_d435i/session_02/result.json
 # 扫描快照（融合点云、桌面模型、障碍列表、每个视点的彩色图）保存目录。
 scan_artifact_root: /home/hank/piper_ws/calibration/bottle_grasp_scan
 
+# 目标物：直立细长小筒，外径25mm、高95mm，刚性、表面粗糙不反光。
 # link6->抓取中心的平移(m)和旋转(rad)，不是tool->link6。
+# 0.10 = 夹指垫中心（URDF 中指垫覆盖 link6 z=59~136mm）。
 link6_tool_xyz: [0, 0, 0.10]
 link6_tool_rpy: [0.0, 0.0, 0.0]
 
-bottle_height: 0.17
-bottle_radius: 0.03
-# 接触点距拟合桌面上表面的高度(m)，必须位于瓶身内。
-# 7cm 时 link4/link5 常贴到 table 碰撞盒；9cm 已通过 10/10 dry-run。
-grasp_height_from_table: 0.09
+bottle_height: 0.095
+bottle_radius: 0.0125
+# 接触点距拟合桌面上表面的高度(m)。
+# 指垫中心落在小筒中上段；30°斜向下接近时指尖最低点约离桌面2.9cm，
+# 桌面碰撞盒顶约1cm，余量约2cm；掌部从小筒靠机器人一侧绕过。
+# 侧向接近时7cm会把手腕压进 table 碰撞盒，因此需配合 approach_mode=top。
+grasp_height_from_table: 0.065
 # 反算后仍存在的、经过实物验证的base_link X/Y残差；初始保持0。
 bottle_center_offset_xy: [0.0, 0.0]
 pregrasp_distance: 0.10
@@ -27,15 +31,26 @@ lift_table_margin: 0.005    # 抬升只需越过碰撞盒顶 5mm
 lift_clearance: 0.03
 
 # 完整夹爪开口(m)；joint7/joint8各为开口的一半。
+# 这里是滑块坐标；物理指垫间距见下方 gripper_pad_offset_m。
 gripper_opening_open: 0.07
 gripper_opening_close_command: 0.0
 # 力控模式下这是驱动器力矩上限（0.5～2.0），不是目标力；目标力见 grasp_force_n。
+# 1.0 的堵转力约4~4.5N，对2.5N目标留有余量，又不会把刚性小筒夹伤。
 gripper_effort: 1.0
-# 闭合后实测开口范围与负载阈值，按真实瓶子/夹指/驱动反馈校验。
+# 闭合后实测开口范围与负载阈值。
 # 要求：闭合目标 < min < max < 张开目标。
-grasp_opening_min: 0.035
+# 注意：这里的开口都是 joint7-joint8 的“滑块间距”，不是指垫内表面间距。
+#       物理指垫间距 ≈ 该值 + gripper_pad_offset_m。
+# 25mm 小筒必须能闭到 25mm 以下，否则永远检测不到接触。
+# 再调小到10mm：给接触检测和开口反馈误差留余量；力控仍会在
+# 接触点-3mm处停下，不会因为下限小而一直压到10mm。
+grasp_opening_min: 0.010
 grasp_opening_max: 0.065
 grasp_effort_min: 0.30
+# 滑块开口 -> 真实指垫内表面间距的固定偏移(m)，只用于日志显示。
+# 实测：16.5mm 滑块开口对应 22mm 指垫间距（URDF指垫面内缩约2mm/侧，
+# 实物橡胶垫再加约0.7mm/侧）。不参与力控、限位或安全判断。
+gripper_pad_offset_m: 0.0055
 # 可接额外视觉/夹持传感器的Trigger服务：success=true表示确认抓住。
 # 未填写则依赖经过实物校验的开口+负载+稳定时间，仍不能证明无滑移。
 grasp_check_service: ""
@@ -47,11 +62,12 @@ gripper_settle_time: 1.5
 # ================= 力控（RPPS-200，单侧） =================
 # true=必须连接传感器并闭环；暂时不接传感器、只跑旧流程时改为 false。
 force_control: true
-# 单侧法向力目标(N)。闭环按传感器实测力停止，不是 gripper_effort 的换算值。
-grasp_force_n: 8.0
-grasp_force_tolerance_n: 1.0
-grasp_force_max_n: 12.0
-grasp_force_min_n: 4.0
+# 单侧法向力目标(N)。小筒+粗糙表面按 μ≈0.5 估算：
+# 2 x μ x 2.5N ≈ 2.5N 摩擦力，对约1N自重有2.5倍余量。
+grasp_force_n: 0.6
+grasp_force_tolerance_n: 0.2
+grasp_force_max_n: 6.0
+grasp_force_min_n: 0.2
 # 空=自动扫描 /dev/ttyACM*、/dev/ttyUSB*；也可写 /dev/serial/by-id/...
 rpps_port: ""
 rpps_baud: 2000000
@@ -66,14 +82,16 @@ rpps_tare_frames: 30
 force_step_coarse_m: 0.001
 force_step_fine_m: 0.0002
 force_settle_time: 0.10
-force_max_squeeze_m: 0.008
+# 刚性小筒：接触后最多再压3mm。目标力只需要很小的位移就能达到，
+# 这个上限同时是传感器失效时的机械保护。
+force_max_squeeze_m: 0.003
 # 运输保压：每0.15s最多调0.1mm，力死区0.5N。
 force_hold_period: 0.15
 force_hold_step_m: 0.0001
 force_hold_deadband_n: 0.5
 force_max_steps: 300
 
-velocity_scale: 0.03
+velocity_scale: 0.06
 acceleration_scale: 0.03
 planning_time: 20.0
 planning_attempts: 8
@@ -81,15 +99,28 @@ planning_attempts: 8
 # 先用它连续跑 5~10 次评估成功率，再改回 false 做实机抓取。
 dry_run: false
 cartesian_joint_step_limit: 0.15
-# 相对 base_link 中"基座 -> 瓶子"径向的偏转；0度=正对瓶子的径向接近，
-# 正值绕base Z逆时针偏转。程序会规划全部候选并按关节代价选最小。
+# 相对 base_link 中"基座 -> 目标"径向的偏转；正值绕base Z逆时针。
+# side 模式下这是接近方向的偏转；top 模式下接近方向固定朝下，只旋转
+# 夹爪绕竖直轴的朝向。程序会规划全部候选并按关节代价选最小。
 approach_yaw_offsets_deg: [0.0, 15.0, -15.0, 30.0, -30.0]
+# side：水平径向接近（历史行为，适合高瓶子）；
+# top ：从上方接近（矮小物体必需，否则腕部撞桌面）。
+# approach_tilt_deg 只对 top 生效：接近方向相对竖直的倾角，0=纯竖直向下。
+# 该腕部 joint5 只有 ±70°，工具轴与 joint5 轴垂直，纯竖直要求约90°，
+# 因此最小可行倾角约25°（实测0~20°均无IK解）。这里取30°留余量。
+# 倾角与物体距离有关：25°可到x≈0.46m，30°可到x≈0.54m，35°可到x≈0.58m。
+approach_mode: top
+approach_tilt_deg: 30.0
 show_detection_window: true
 # 每个扫描视点采集时都显示相机画面（窗口"Scan Views"）；全部采完后再显示
 # 一张2x3拼图，方便确认5个视点都覆盖到了工作区。需要桌面环境。
 show_scan_windows: true
-# null代表任意颜色，可选bottle-y、bottle-g、bottle-b。
+# null代表不过滤颜色标签，可选bottle-y、bottle-g、bottle-b。
 target_bottle_label: null
+# 是否要求检测框内的颜色必须归入 bottle-y/g/b 三色。
+# cylinder.pt 只识别形状，目标颜色不在三色范围内，因此关闭颜色门槛，
+# 直接使用YOLO类别名（cylinder）。
+color_filter: false
 
 # ================= 实时扫描 =================
 # map      ：静态障碍地图（默认）。除目标瓶和精确桌面外，扫描到的一切都进OctoMap。
@@ -101,11 +132,15 @@ scan_cloud_topic: /piper/static_scan/points
 scan_camera_frame: camera_color_optical_frame
 
 # 启动后机械臂先走到这个关节位，再按 joint1/joint2 偏移依次扫描。
-# 该视点必须能同时看到瓶子和卡片；第一段运动没有地图保护，必须人工确认路径安全。
-scan_start_joint_target: [0.0, 0.691, -1.022, 0.0, 0.838, 0.0]
+# 该视点必须能同时看到目标和周围；第一段运动没有地图保护，必须人工确认路径安全。
+# 扫描结束后还会先回到这个关节位，再开始预抓取规划/接近，保证抓取起点固定。
+# 视点1 = 当前实测姿态（joint1..6，rad）。
+scan_start_joint_target: [0.0, 0.12481, -0.44467, 0.0, 0.95733, 0.0]
 # 每个视点相对 scan_start_joint_target 的偏移（rad），做笛卡尔积。
-# joint1 扫 ±45°（5个偏航角），视点0固定为起始位；相机水平视场约70°，相邻视点有重叠。
-scan_joint1_offsets: [-0.7854, -0.3927, 0.0, 0.3927, 0.7854]
+# 相机离物体只有约0.32m，joint1 偏转会被物体相对相机的方位角放大：
+# ±45°时物体已在水平视场(±34.5°)外，±20°才稳定在画面内。
+# 因此这组视点改成 ±10°/±20°，5个视点都能看到目标。
+scan_joint1_offsets: [-0.3491, -0.1745, 0.0, 0.1745, 0.3491]
 # 第二个维度：关节2俯仰档位。默认只扫一档；要覆盖更高/更矮的障碍时加一档
 # （例如 [0.0, -0.25]），务必先空跑确认方向不会撞桌/撞相机。
 scan_joint2_offsets: [0.0]
@@ -120,9 +155,10 @@ scan_min_views: 1
 
 # 融合体素(m)与聚类体素(m)。
 scan_voxel_m: 0.006
-scan_cluster_voxel_m: 0.012
+# 25mm 小筒体素化后点很少：12mm 会把细节并掉，降到8mm并允许20点成簇。
+scan_cluster_voxel_m: 0.008
 scan_min_points: 500
-scan_min_cluster_points: 40
+scan_min_cluster_points: 20
 # 深度降采样步长与有效深度范围(m)。相机到夹爪的距离小于下限，天然剔除夹爪自身。
 scan_stride: 2
 scan_min_depth: 0.25
@@ -191,9 +227,10 @@ scan_card_max_top_height: 0.30
 # 首视点漏检卡片时，用全部视点融合点云补检；补检到的卡片离目标瓶超过这个
 # 水平距离就拒绝（0=不限制），防止侧视把远处板子当成卡片。
 scan_card_max_distance_from_target: 0.80
-# 圆柱：拟合半径/高度与参数瓶子一致。
-scan_cylinder_radius_tol: 0.6
-scan_cylinder_height_tol: 0.5
+# 圆柱：拟合半径/高度与参数目标一致。
+# 小筒只有25mm，单侧可见圆弧的Kasa拟合会偏小，容差放宽到±80%/±60%。
+scan_cylinder_radius_tol: 0.8
+scan_cylinder_height_tol: 0.6
 scan_non_target_cylinder: true
 # 障碍物碰撞体外扩(m)。
 scan_obstacle_padding: 0.01
@@ -207,7 +244,8 @@ scan_corridor_radius: 0.06
 scan_corridor_samples: 24
 
 # ================= 放置 =================
-enable_place: true
+# 只抓不放：抓取→抬升→回零→停，夹爪保持夹持。
+enable_place: false
 # card：把瓶子放到扫描识别出的卡片正前方；fixed：使用place_tool_pose。
 place_mode: card
 place_approach_height: 0.10

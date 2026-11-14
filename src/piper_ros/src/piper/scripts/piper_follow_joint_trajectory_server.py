@@ -455,10 +455,19 @@ class PiperFollowJointTrajectoryServer:
                 if error > path_tolerances[index]
             ]
             if violated:
+                details = "; ".join(
+                    "{} desired={:.4f} actual={:.4f} error={:+.4f}".format(
+                        name, target, measured, target - measured
+                    )
+                    for name, target, measured in zip(
+                        self.joints, desired, actual
+                    )
+                )
                 self._abort(
                     FollowJointTrajectoryResult.PATH_TOLERANCE_VIOLATED,
-                    "路径跟踪误差超限：{}，最大误差 {:.4f} rad".format(
-                        ", ".join(violated), max(errors)
+                    "路径跟踪误差超限：{}，最大误差 {:.4f} rad；"
+                    "各关节期望/实测/误差(rad)：{}".format(
+                        ", ".join(violated), max(errors), details
                     ),
                 )
                 return

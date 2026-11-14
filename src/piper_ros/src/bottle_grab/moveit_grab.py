@@ -171,6 +171,10 @@ class PiperVisionController:
         cfg.model_path = str(rospy.get_param("~model_path", DEFAULT_MODEL_PATH))
         calibration_path = rospy.get_param(
             "~hand_eye_calibration", DEFAULT_CALIBRATION_PATH)
+        # 检测器是否必须把框内颜色归入 bottle-y/g/b 三色。换成只识别目标
+        # 形状的权重（例如 cylinder.pt）且目标颜色不在三色范围内时设为 false，
+        # 直接用YOLO类别名作为标签。
+        cfg.color_filter = bool(rospy.get_param("~color_filter", True))
         cfg.target_label = rospy.get_param(
             "~target_bottle_label", TARGET_BOTTLE_LABEL)
         if cfg.target_label not in (None, "bottle-y", "bottle-g", "bottle-b"):
@@ -208,6 +212,14 @@ class PiperVisionController:
             raise ValueError("~approach_yaw_offsets_deg需要1～12个方向")
         cfg.approach_yaws = numeric_list(
             "~approach_yaw_offsets_deg", candidate_yaws, len(candidate_yaws))
+        # side：水平径向接近（历史行为）；top：从上方接近，可用
+        # approach_tilt_deg 让接近方向从正上方朝机器人一侧倾斜（0=竖直）。
+        # 物体离底座较远时纯竖直姿态会超出机械臂可达范围（KDL无解）。
+        cfg.approach_mode = str(rospy.get_param("~approach_mode", "side"))
+        if cfg.approach_mode not in ("side", "top"):
+            raise ValueError("~approach_mode必须是side/top")
+        cfg.approach_tilt_deg = finite_float(
+            "~approach_tilt_deg", 0.0, minimum=0.0, maximum=85.0)
 
         cfg.opening_open = finite_float(
             "~gripper_opening_open", minimum=0.0, maximum=0.07)
@@ -223,6 +235,11 @@ class PiperVisionController:
             raise ValueError("要求: 闭合目标 < 夹持开口下限 < 上限 < 张开目标")
         cfg.grasp_effort_min = finite_float(
             "~grasp_effort_min", minimum=0.0, strict_min=True)
+        # joint7-joint8 是滑块开口，不是指垫内表面间距。实物实测：指垫面
+        # 比滑块基准面外移约2.7mm/侧（URDF指垫内缩约2mm + 橡胶垫约0.7mm），
+        # 合计约5.5mm。仅用于日志显示，不参与控制/安全判断。
+        cfg.gripper_pad_offset = finite_float(
+            "~gripper_pad_offset_m", 0.0, minimum=0.0, maximum=0.02)
         cfg.grasp_check_service = str(rospy.get_param("~grasp_check_service", ""))
         cfg.gripper_effort = finite_float(
             "~gripper_effort", minimum=0.5, maximum=2.0)
@@ -649,7 +666,8 @@ class PiperVisionController:
                 hold_step_m=cfg.force_hold_step_m,
                 hold_deadband_n=cfg.force_hold_deadband_n,
                 sensor_timeout_s=cfg.rpps_sensor_timeout,
-                max_steps=cfg.force_max_steps)
+                max_steps=cfg.force_max_steps,
+                pad_offset_m=cfg.gripper_pad_offset)
         self.force_sensor = force_sensor
         self.force_config = force_config
 
@@ -660,7 +678,8 @@ class PiperVisionController:
             cfg.gripper_settle_time, cfg.grasp_opening_min,
             cfg.grasp_opening_max, cfg.grasp_effort_min,
             cfg.grasp_check_service,
-            force_sensor=force_sensor, force_config=force_config)
+            force_sensor=force_sensor, force_config=force_config,
+            pad_offset_m=cfg.gripper_pad_offset)
         self.arm_controller = ArmController(
             move_group, self.robot, self.scene_manager, self.joint_feedback,
             self.display_pub, self.state,
@@ -670,7 +689,8 @@ class PiperVisionController:
         self._ensure_camera_tf()
         self.camera = RealSenseCamera(
             COLOR_WIDTH, COLOR_HEIGHT, DEPTH_WIDTH, DEPTH_HEIGHT, FPS)
-        self.detector = BottleDetector(cfg.model_path)
+        self.detector = BottleDetector(
+            cfg.model_path, require_color=cfg.color_filter)
         self.scan_task = ScanTask(
             cfg, self.state, self.arm_controller, self.gripper,
             self.scene_manager, self.joint_feedback, self.camera,
@@ -757,12 +777,21 @@ class PiperVisionController:
         if (self.gripper is not None
                 and self.gripper.force_control_enabled is True):
             rospy.loginfo(
-                "力控已启用: 目标%.2fN 容差±%.2fN 上限%.2fN 下限%.2fN",
+                "力控已启用: 目标%.2fN 容差±%.2fN 上限%.2fN 下限%.2fN "
+                "指垫偏移+%.1fmm",
                 self.force_config.target_n, self.force_config.tolerance_n,
-                self.force_config.max_n, self.force_config.min_n)
+                self.force_config.max_n, self.force_config.min_n,
+                self.config.gripper_pad_offset * 1000.0)
         self.camera.start()
         self.detector.load()
         self.scan_task.execute()
+        # 扫描结束时机械臂停在最后一个视点；先回到第一个视点，让抓取始终从
+        # 同一个已验证的构型开始（相机也回到能同时看到目标和周围的视角）。
+        rospy.loginfo(
+            ">>> 扫描完成，回到第一个扫描视点 %s 再抓取",
+            [round(float(value), 3)
+             for value in self.config.scan_start_joint_target])
+        self.arm_controller.move_joints(self.config.scan_start_joint_target)
         self.grasp_task.execute_vision_grasp()
 
     def close(self):

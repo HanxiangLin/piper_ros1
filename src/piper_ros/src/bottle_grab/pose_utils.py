@@ -101,6 +101,33 @@ def level_grasp_rotation_for_azimuth(azimuth_rad):
     return np.column_stack((grasp_x, grasp_y, grasp_z))
 
 
+def top_grasp_rotation_for_azimuth(azimuth_rad, tilt_deg=0.0):
+    """从上方接近的抓取姿态：Z 轴（接近方向）向下并朝机器人一侧倾斜。
+
+    ``azimuth_rad`` 是 base_link 中从原点指向抓取点的水平方位角；
+    ``tilt_deg`` 是接近方向相对竖直方向的倾角，0° 为纯竖直向下。
+    倾角必须存在，是因为物体离底座较远时纯竖直姿态会超出机械臂可达
+    范围（KDL 直接报 NO_IK_SOLUTION）；从 35° 起才稳定有解。
+
+    Z 轴朝下并向物体外侧（远离底座）倾斜，因此预抓取点会同时向上、
+    向底座一侧后退。Y 轴取水平切向，保证夹指仍是同一水平面内闭合，
+    掌部不会随倾角压到物体上。
+    """
+    azimuth = float(azimuth_rad)
+    tilt = math.radians(float(tilt_deg))
+    if not 0.0 <= tilt <= math.radians(85.0):
+        raise ValueError("top 接近倾角必须在0~85度内")
+    grasp_z = np.array([
+        math.sin(tilt) * math.cos(azimuth),
+        math.sin(tilt) * math.sin(azimuth),
+        -math.cos(tilt)])
+    grasp_y = np.array([-math.sin(azimuth), math.cos(azimuth), 0.0])
+    # 右手系要求 X x Y = Z，因此 X = Y x Z。
+    grasp_x = np.cross(grasp_y, grasp_z)
+    grasp_x /= np.linalg.norm(grasp_x)
+    return np.column_stack((grasp_x, grasp_y, grasp_z))
+
+
 def validate_transform(matrix, name):
     """Raise ValueError unless ``matrix`` is a valid 4x4 rigid transform."""
     if (matrix.shape != (4, 4) or not np.isfinite(matrix).all()
