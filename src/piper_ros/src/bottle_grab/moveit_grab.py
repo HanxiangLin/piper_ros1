@@ -260,6 +260,10 @@ class PiperVisionController:
             "~scan_joint2_offsets", pitches, len(pitches))
         if any(abs(value) > 0.6 for value in cfg.scan_joint2_offsets):
             raise ValueError("~scan_joint2_offsets单次偏移不能超过0.6rad")
+        # 扫描完先回第一个视点，再从那里开始抓取：最后一个视点是最大偏转角，
+        # 从那个"最远最斜"的姿态规划抓取会多绕路，也容易落到另一个IK分支。
+        cfg.scan_return_to_first_view = bool(rospy.get_param(
+            "~scan_return_to_first_view", True))
         cfg.scan_settle_time = finite_float(
             "~scan_settle_time", 1.0, minimum=0.0, maximum=5.0)
         cfg.scan_frames_per_view = int(rospy.get_param(
@@ -690,7 +694,7 @@ def main():
             controller.clear_display()
             rospy.logwarn(
                 "已在RViz清除规划轨迹显示；本次没有执行任何抓取动作，"
-                "机械臂停在扫描结束位")
+                "机械臂停在当前位姿")
         return 1
     finally:
         # __init__失败也会进入这里；只释放已有资源，保留真实夹持对应的场景。

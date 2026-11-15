@@ -283,6 +283,7 @@ YOLO模型加载完成
 >>> 扫描视点1: joint1偏移+0.393 joint2偏移+0.000
 ...
 >>> 扫描视点4: joint1偏移-0.785 joint2偏移+0.000
+>>> 扫描结束：回到第一个视点(scan_start_joint_target)再开始抓取
 障碍地图已建立: frame=dummy_link 分辨率=0.020m 序列化NNNNNN字节
 当前机械臂状态与障碍地图无碰撞
 扫描结果: 桌面平面 z=... / 目标瓶 ... / 障碍物 0 个 / 卡片 ...
@@ -435,6 +436,8 @@ $PY moveit_grab.py _params_file:=$PARAMS _dry_run:=true
 | `目标瓶在多视点融合中丢失` | 某个视点看不到瓶子：`_scan_joint1_offsets:="[0.0,0.35,-0.35]"` |
 | `物体接触区域靠近table边界` | 松手点在**已观测到的**支撑面之外（现在 footprint 以瓶子为中心 0.6m）：缩小 `_place_offset_from_card`，或把扫描视点/ROI 调到能看到卡片外侧桌面 |
 | `没有可行的接近走廊` | 日志里会写“被哪个 id 挡住、净距多少”；调 `_scan_corridor_radius:=0.04` |
+| 扫完视点后又多走一段 | 正常行为：`scan_return_to_first_view: true`（默认）会先回 `scan_start_joint_target` 再抓取。不想走就设 `false` |
+| `当前机械臂状态与障碍地图无碰撞` 失败（现在是在第一个视点上判的） | 回位后（=抓取起始位）手臂本身撞图：加大 `_scan_map_base_keepout_radius`，或让第一视点离桌面再远一点 |
 | `接近方向..度被地图点(x,y,z)挡住: 净距...` | map模式的走廊检查读的是发布给OctoMap的点云（语义盒为空）。坐标就是那簇杂物，挪走它或换 `_approach_yaw_offsets_deg`；只有全部方向都被挡时才退回“按净距排序交给MoveIt”，所以这不是致命错误 |
 | `就近IK目标状态无效/碰撞: [('<octomap>', 'link8')]` | IK解本身撞地图：指尖压在瓶边杂物上。已在规划前快速失败（不再等满 `planning_time`）；换方向、加大 `_pregrasp_distance`，或把杂物挪开 |
 | `Fail: ABORTED: TIMED_OUT` + RViz 有一条到瓶子附近的轨迹，但真机不动 | 那条轨迹是 move_group 发的规划结果（包括被否决的候选），不是执行指令。日志里没有 `>>> 执行预抓取轨迹` 就没执行；失败时程序会清掉该显示 |

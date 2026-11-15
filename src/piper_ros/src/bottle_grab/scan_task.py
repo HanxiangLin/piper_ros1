@@ -12,6 +12,10 @@ Two stages, because the first motion has no map to protect it:
   again.  These motions are planned against the stage-A map, so the swing
   cannot hit an obstacle the first view already saw.
 
+After the last viewpoint the arm returns to the first (reference) pose, so the
+grasp is planned from the configuration the operator verified instead of the
+farthest, most slanted scan pose (``scan_return_to_first_view``).
+
 In ``scan_mode=map`` (default) the collision scene is:
 
 * one *exact* support box (``table``, top surface = fitted plane),
@@ -100,6 +104,31 @@ class ScanTask:
                     continue
                 views.append((float(joint1), float(joint2)))
         return views
+
+    def _return_to_first_view(self, start, views):
+        """Move back to the first (reference) viewpoint before grasping.
+
+        The last viewpoint is normally the largest joint1 swing, i.e. the
+        farthest and most slanted pose of the whole scan.  Planning the grasp
+        from there costs a long detour and invites a different IK branch; the
+        first viewpoint is the pose the operator verified sees both the bottle
+        and the card, so grasping starts from a known configuration.
+
+        Only joint motion is needed and the scene is not frozen yet, hence
+        ``guarded=False`` exactly like the other scan motions.
+        """
+        if not bool(getattr(self.config, "scan_return_to_first_view", True)):
+            rospy.loginfo(
+                "扫描结束不回第一个视点(scan_return_to_first_view=false)")
+            return
+        if len(views) < 2:
+            return
+        offset1, offset2 = views[-1]
+        if abs(offset1) < 1e-9 and abs(offset2) < 1e-9:
+            return
+        rospy.loginfo(
+            ">>> 扫描结束：回到第一个视点(scan_start_joint_target)再开始抓取")
+        self.arm.move_joints(list(start), guarded=False)
 
     def execute(self):
         rospy.loginfo(">>> 扫描：清场并移动到扫描起始位")
@@ -206,6 +235,7 @@ class ScanTask:
                     fused.last_view_points(), transform, stamp, table,
                     target_center, index)
 
+        self._return_to_first_view(start, views)
         self._show_scan_sheet(images)
         if table is None:
             raise RuntimeError("扫描没有产生桌面模型")

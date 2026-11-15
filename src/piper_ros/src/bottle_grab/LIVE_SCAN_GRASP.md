@@ -31,6 +31,8 @@ OMPL 运动到 scan_start_joint_target
        → 挖掉底座圆柱/目标瓶/支撑面 → 以optical frame发布该视点 → 等OctoMap稳定
 视点1..4：joint1 ±22.5°/±45° → 同上（换姿轨迹已在上一视点地图上规划）
          后续视点只精修目标瓶中心，不重新聚类整个房间
+回起始视点：默认再走一段 OMPL 回到 scan_start_joint_target，从这里开始抓取
+         （最后一个视点是最大偏转角，从那里规划抓取要多绕路、易换IK分支）
 画面显示：每个视点在窗口 Scan Views 中逐帧显示（view N/5 + 关节偏角）；
          全部视点采完后换成 2x3 拼图，方便确认覆盖范围
 卡片补检：若视点0没识别出卡片（常见于瓶子挡在卡片前把卡片切成两块），
@@ -66,6 +68,7 @@ OMPL 运动到 scan_start_joint_target
 | `scan_start_joint_target` | 第一个视点的关节角，必须能同时看见瓶子和卡片 |
 | `scan_joint1_offsets` | 相对起始位的 joint1 偏移，默认 5 个偏航角（±22.5°/±45°） |
 | `scan_joint2_offsets` | 相对起始位的 joint2 偏移（俯仰档位），默认只扫一档 |
+| `scan_return_to_first_view` | 扫完所有视点后先回 `scan_start_joint_target` 再抓取（默认 `true`） |
 | `show_scan_windows` | 每个视点采集时都显示相机画面（窗口 `Scan Views`），全部采完后再显示一张拼图；默认 `true` |
 | `scan_mode` | `map`（默认）/ `semantic`（旧语义盒，回滚用）/ `both`（调试，双重膨胀） |
 | `scan_max_range` | 传感器有效深度，默认 2.0m（也是 OctoMap 的量程） |

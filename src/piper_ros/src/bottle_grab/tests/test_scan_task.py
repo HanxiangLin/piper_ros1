@@ -24,6 +24,7 @@ def scan_config(root):
         scan_start_joint_target=[0.0, 0.297, -0.648, 0.0, 0.878, 0.0],
         scan_joint1_offsets=[0.0, 0.357, -0.357],
         scan_joint2_offsets=[0.0],
+        scan_return_to_first_view=True,
         scan_settle_time=0.0,
         scan_frames_per_view=2,
         scan_frame_interval=0.0,
@@ -163,11 +164,12 @@ class ScanTaskTests(unittest.TestCase):
             return_value=(frames, None, np.eye(4), None))
         result = task.execute()
 
-        # 三个视点：起始位 + 两个 joint1 偏移。
-        self.assertEqual(arm.move_joints.call_count, 3)
+        # 三个视点：起始位 + 两个 joint1 偏移；扫完再回起始位准备抓取。
+        self.assertEqual(arm.move_joints.call_count, 4)
         self.assertAlmostEqual(arm.move_joints.call_args_list[0][0][0][0], 0.0)
         self.assertAlmostEqual(arm.move_joints.call_args_list[1][0][0][0], 0.357)
         self.assertAlmostEqual(arm.move_joints.call_args_list[2][0][0][0], -0.357)
+        self.assertAlmostEqual(arm.move_joints.call_args_list[3][0][0][0], 0.0)
         for call in arm.move_joints.call_args_list:
             self.assertFalse(call[1].get("guarded", True))
 
@@ -188,6 +190,42 @@ class ScanTaskTests(unittest.TestCase):
         self.assertEqual(len(folders), 1)
         self.assertTrue((folders[0] / "cloud.npz").is_file())
         self.assertTrue((folders[0] / "table_model.json").is_file())
+
+    def test_scan_returns_to_first_view_before_grasping(self):
+        task, state, arm, scene, detector, root = self.build()
+        frames = [scene_cloud()[:12000], scene_cloud()[:12000]]
+        task._capture = MagicMock(
+            return_value=(frames, None, np.eye(4), None))
+        frozen_after = {}
+        scene.freeze.side_effect = lambda result: frozen_after.update(
+            moves=arm.move_joints.call_count)
+        task.execute()
+
+        # 最后一个视点是 joint1=-0.357；抓取前必须回到 scan_start_joint_target。
+        np.testing.assert_allclose(
+            arm.move_joints.call_args_list[-1][0][0],
+            task.config.scan_start_joint_target)
+        # 回位发生在建模自检/冻结之前，抓取才会从起始位开始规划。
+        self.assertEqual(frozen_after["moves"], 4)
+
+    def test_return_to_first_view_can_be_disabled(self):
+        task, state, arm, scene, detector, root = self.build()
+        task.config.scan_return_to_first_view = False
+        frames = [scene_cloud()[:12000], scene_cloud()[:12000]]
+        task._capture = MagicMock(
+            return_value=(frames, None, np.eye(4), None))
+        task.execute()
+        self.assertEqual(arm.move_joints.call_count, 3)
+
+    def test_single_view_scan_does_not_move_back(self):
+        task, state, arm, scene, detector, root = self.build()
+        task.config.scan_joint1_offsets = [0.0]
+        frames = [scene_cloud()[:12000], scene_cloud()[:12000]]
+        task._capture = MagicMock(
+            return_value=(frames, None, np.eye(4), None))
+        task.execute()
+        # 只有一个视点时本来就在起始位，不该再走一段。
+        self.assertEqual(arm.move_joints.call_count, 1)
 
     def test_map_mode_publishes_one_cloud_per_view_and_no_semantic_boxes(self):
         task, state, arm, scene, detector, root = self.build()
