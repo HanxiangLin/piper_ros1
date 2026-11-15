@@ -7,7 +7,10 @@
 model_path: /home/hank/piper_ws/src/piper_ros/src/bottle_grab/cylinder.pt
 hand_eye_calibration: /home/hank/piper_ws/calibration/eye_in_hand_d435i/session_02/result.json
 # 扫描快照（融合点云、桌面模型、障碍列表、每个视点的彩色图）保存目录。
+# 实际写入 <scan_artifact_root>/<scan_artifact_name>/：不存在则创建，
+# 已存在则整目录删除后重写，不再按时间戳堆积。
 scan_artifact_root: /home/hank/piper_ws/calibration/bottle_grasp_scan
+scan_artifact_name: scan_latest
 
 # 目标物：直立细长小筒，外径25mm、高95mm，刚性、表面粗糙不反光。
 # link6->抓取中心的平移(m)和旋转(rad)，不是tool->link6。

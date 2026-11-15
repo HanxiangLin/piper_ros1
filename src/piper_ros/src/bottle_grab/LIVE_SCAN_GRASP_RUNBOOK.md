@@ -361,7 +361,7 @@ Display → MotionPlanning → Planned Path → Show Trail = true
 export WS=/home/hank/piper_ws
 export PY=$WS/.venv-vision/bin/python
 
-d=$(ls -dt $WS/calibration/bottle_grasp_scan/scan_2*/ 2>/dev/null | head -1)   # 新目录是 scan_<日期>_<时间>
+d=$WS/calibration/bottle_grasp_scan/scan_latest   # 固定目录：每次成功扫描覆盖
 echo "$d"
 
 cat "$d/summary.txt"

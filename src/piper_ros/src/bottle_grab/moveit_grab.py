@@ -516,6 +516,15 @@ class PiperVisionController:
             raise ValueError("~scan_corridor_samples至少为2")
         cfg.scan_artifact_root = str(rospy.get_param(
             "~scan_artifact_root", DEFAULT_ARTIFACT_ROOT))
+        # 固定快照目录名：不存在则创建，存在则整目录删除后覆盖。
+        cfg.scan_artifact_name = str(rospy.get_param(
+            "~scan_artifact_name", "scan_latest")).strip()
+        if (not cfg.scan_artifact_name
+                or cfg.scan_artifact_name in (".", "..")
+                or "/" in cfg.scan_artifact_name
+                or "\\" in cfg.scan_artifact_name
+                or Path(cfg.scan_artifact_name).is_absolute()):
+            raise ValueError("~scan_artifact_name 必须是单层目录名")
 
         # ---------------- 放置参数 ----------------
         cfg.enable_place = bool(rospy.get_param("~enable_place", True))

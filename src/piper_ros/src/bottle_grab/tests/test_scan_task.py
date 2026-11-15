@@ -76,6 +76,7 @@ def scan_config(root):
         scan_non_target_cylinder=True,
         scan_obstacle_padding=0.01,
         scan_artifact_root=root,
+        scan_artifact_name="scan_latest",
         bottle_height=0.17,
         bottle_radius=0.03,
         lift_distance=0.04,
@@ -188,6 +189,31 @@ class ScanTaskTests(unittest.TestCase):
         self.assertEqual(len(folders), 1)
         self.assertTrue((folders[0] / "cloud.npz").is_file())
         self.assertTrue((folders[0] / "table_model.json").is_file())
+
+    def test_scan_artifacts_are_reused_and_overwritten(self):
+        task, *_ = self.build()
+        root = Path(task.config.scan_artifact_root)
+        result = {
+            "table": {"plane_normal": [0.0, 0.0, 1.0],
+                      "plane_offset": 0.0,
+                      "bounds_min": [0.0, 0.0, 0.0],
+                      "bounds_max": [1.0, 1.0, 1.0],
+                      "surface_top": 0.1},
+            "target_center": np.array([0.5, -0.15, 0.085]),
+            "card": None, "obstacles": [], "detections": [],
+            "views": 1, "frames": 1, "points": 3,
+        }
+        points = np.zeros((3, 3))
+        observations = np.zeros(3, dtype=int)
+        task._save(result, points, observations, [], ["first"])
+        folder = root / "scan_latest"
+        self.assertTrue((folder / "cloud.npz").is_file())
+        self.assertIn("first", (folder / "summary.txt").read_text())
+        (folder / "stale.txt").write_text("old", encoding="utf-8")
+        task._save(result, points, observations, [], ["second"])
+        self.assertFalse((folder / "stale.txt").exists())
+        self.assertIn("second", (folder / "summary.txt").read_text())
+        self.assertEqual(list(root.glob("scan_*")), [folder])
 
     def test_map_mode_publishes_one_cloud_per_view_and_no_semantic_boxes(self):
         task, state, arm, scene, detector, root = self.build()

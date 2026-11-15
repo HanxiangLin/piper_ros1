@@ -30,6 +30,7 @@ verifies that the scene did not change.
 
 import json
 import math
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -630,11 +631,28 @@ class ScanTask:
     # ------------------------------------------------------------------
     # Artifacts.
     # ------------------------------------------------------------------
-    def _save(self, result, points, observations, images, summary):
+    def _artifact_folder(self):
+        """Return the fixed artifact directory; validate it stays under root."""
         root = Path(self.config.scan_artifact_root).expanduser()
+        name = str(getattr(self.config, "scan_artifact_name",
+                           "scan_latest")).strip()
+        if (not name or name in (".", "..") or "/" in name
+                or "\\" in name or Path(name).is_absolute()):
+            raise ValueError(
+                "scan_artifact_name 必须是单层目录名: %r" % name)
+        return root / name
+
+    def _save(self, result, points, observations, images, summary):
         try:
-            folder = root / time.strftime("scan_%Y%m%d_%H%M%S")
-            folder.mkdir(parents=True, exist_ok=True)
+            folder = self._artifact_folder()
+            # 固定目录：不存在就建，存在就把上一次的整个目录删掉重写，
+            # 避免陈旧文件（旧视点图/旧地图）混进本次快照。
+            folder.parent.mkdir(parents=True, exist_ok=True)
+            if folder.is_symlink() or folder.is_file():
+                folder.unlink()
+            elif folder.exists():
+                shutil.rmtree(folder)
+            folder.mkdir(parents=True, exist_ok=False)
             np.savez_compressed(folder / "cloud.npz",
                                 points=points, observations=observations)
             (folder / "table_model.json").write_text(json.dumps(

@@ -91,7 +91,8 @@ YOLO 检测就近匹配；两者都分不清就直接中止，不猜。
 
 ## 5. 每次扫描的落盘产物
 
-`scan_artifact_root/scan_<时间戳>/`：
+`scan_artifact_root/scan_artifact_name/`（默认 `scan_latest`；不存在则创建，
+已存在则整目录覆盖）：
 
 - `cloud.npz`：融合点云 `points` 与每个点的 `observations`（被几个视点看到）
 - `table_model.json`：本次拟合的桌面（含 `fit_scope`/`surface_top`/`footprint_count`）
