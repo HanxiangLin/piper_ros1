@@ -1,0 +1,77 @@
+[
+  {
+    "view": 0,
+    "stamp": 1794734349.852855,
+    "frame": "camera_color_optical_frame",
+    "stats": {
+      "input": 9652,
+      "base_keepout_removed": 0,
+      "target_removed": 574,
+      "support_removed": 3217,
+      "downsampled_removed": 4477,
+      "published": 1384
+    }
+  },
+  {
+    "view": 1,
+    "stamp": 1794734361.7700615,
+    "frame": "camera_color_optical_frame",
+    "stats": {
+      "input": 18279,
+      "base_keepout_removed": 0,
+      "target_removed": 0,
+      "support_removed": 75,
+      "downsampled_removed": 13848,
+      "published": 4356
+    }
+  },
+  {
+    "view": 2,
+    "stamp": 1794734368.380714,
+    "frame": "camera_color_optical_frame",
+    "stats": {
+      "input": 10643,
+      "base_keepout_removed": 0,
+      "target_removed": 451,
+      "support_removed": 1644,
+      "downsampled_removed": 6195,
+      "published": 2353
+    }
+  },
+  {
+    "view": 3,
+    "stamp": 1794734377.5331326,
+    "frame": "camera_color_optical_frame",
+    "stats": {
+      "input": 9766,
+      "base_keepout_removed": 0,
+      "target_removed": 116,
+      "support_removed": 3035,
+      "downsampled_removed": 5161,
+      "published": 1454
+    }
+  },
+  {
+    "view": 4,
+    "stamp": 1794734384.1013355,
+    "frame": "camera_color_optical_frame",
+    "stats": {
+      "input": 3439,
+      "base_keepout_removed": 0,
+      "target_removed": 0,
+      "support_removed": 1469,
+      "downsampled_removed": 1538,
+      "published": 432
+    }
+  },
+  {
+    "octomap": {
+      "frame": "dummy_link",
+      "id": "OcTree",
+      "resolution": 0.02,
+      "binary": false,
+      "bytes": 190010,
+      "sha256": "1189b03051704ff930b7b12f8c5f08fce241dda27d6db149a28a578ddb34525e"
+    }
+  }
+]
