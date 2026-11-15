@@ -195,11 +195,16 @@ class PiperVisionController:
 
         candidate_yaws = rospy.get_param(
             "~approach_yaw_offsets_deg",
-            [0.0, 15.0, -15.0, 30.0, -30.0])
+            [0.0, 15.0, -15.0, 30.0, -30.0, 45.0, -45.0])
         if not isinstance(candidate_yaws, list) or not candidate_yaws or len(candidate_yaws) > 12:
             raise ValueError("~approach_yaw_offsets_deg需要1～12个方向")
         cfg.approach_yaws = numeric_list(
             "~approach_yaw_offsets_deg", candidate_yaws, len(candidate_yaws))
+        # 只为净距最大的前N个方向做MoveIt规划；候选再多也不会线性增加等待时间。
+        cfg.max_grasp_candidates = int(rospy.get_param(
+            "~max_grasp_candidates", 3))
+        if not 1 <= cfg.max_grasp_candidates <= 12:
+            raise ValueError("~max_grasp_candidates必须在1～12内")
 
         cfg.opening_open = finite_float(
             "~gripper_opening_open", minimum=0.0, maximum=0.07)
@@ -419,6 +424,13 @@ class PiperVisionController:
             "~scan_corridor_samples", 24))
         if cfg.scan_corridor_samples < 2:
             raise ValueError("~scan_corridor_samples至少为2")
+        # map模式下没有语义盒，走廊检查改用发布给OctoMap的点云；每个点按
+        # 半个体素(SDK侧是2cm)外扩后再比较。
+        cfg.scan_corridor_point_inflation = finite_float(
+            "~scan_corridor_point_inflation", 0.01, minimum=0.0, maximum=0.05)
+        # 指尖比link6_tool_xyz更靠前，走廊终点再向前延一段，避免漏掉瓶侧杂物。
+        cfg.scan_corridor_forward_margin = finite_float(
+            "~scan_corridor_forward_margin", 0.04, minimum=0.0, maximum=0.20)
         cfg.scan_artifact_root = str(rospy.get_param(
             "~scan_artifact_root", DEFAULT_ARTIFACT_ROOT))
 
@@ -671,6 +683,14 @@ def main():
     except Exception as error:
         rospy.logerr(
             "MoveIt视觉抓取终止: %s；不自动松爪、detach或回零", error)
+        # RViz的Planned Path显示的是move_group“算出来”的轨迹（包括被本程序
+        # 否决、从未执行的候选）。失败时清掉，避免被误认为真机应该动。
+        controller = getattr(node, "arm_controller", None)
+        if controller is not None and hasattr(controller, "clear_display"):
+            controller.clear_display()
+            rospy.logwarn(
+                "已在RViz清除规划轨迹显示；本次没有执行任何抓取动作，"
+                "机械臂停在扫描结束位")
         return 1
     finally:
         # __init__失败也会进入这里；只释放已有资源，保留真实夹持对应的场景。

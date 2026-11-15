@@ -22,6 +22,9 @@ from grasp_corridor import (  # noqa: E402
     distance_to_box,
     distance_to_cylinder,
     filter_by_corridor,
+    filter_by_points,
+    point_clearance,
+    sort_by_clearance,
 )
 
 
@@ -575,6 +578,83 @@ class CorridorTests(unittest.TestCase):
         self.assertEqual([item["label"] for item in rejected], [0.0])
         self.assertEqual([item["label"] for item in accepted], [30.0])
         self.assertEqual(rejected[0]["blocking"], "scan_obstacle_0")
+
+
+class CorridorPointTests(unittest.TestCase):
+    """The OctoMap point cloud is the only corridor input in scan_mode=map."""
+
+    def test_point_clearance_is_distance_to_segment(self):
+        points = np.array([[0.5, 0.04, 0.20]])
+        start = np.array([0.5, 0.0, 0.20])
+        end = np.array([0.7, 0.0, 0.20])
+        clearance, blocking = point_clearance(start, end, points)
+        self.assertAlmostEqual(clearance, 0.04, places=9)
+        np.testing.assert_allclose(blocking, points[0])
+
+    def test_point_clearance_saturates_at_segment_ends(self):
+        points = np.array([[0.9, 0.0, 0.20]])
+        clearance, _ = point_clearance(
+            np.array([0.5, 0.0, 0.20]), np.array([0.7, 0.0, 0.20]), points)
+        self.assertAlmostEqual(clearance, 0.2, places=9)
+
+    def test_empty_cloud_never_blocks(self):
+        self.assertEqual(
+            point_clearance(np.zeros(3), np.ones(3), np.zeros((0, 3)))[0],
+            float("inf"))
+        candidates = [{"label": 0.0, "start": np.zeros(3), "end": np.ones(3)}]
+        accepted, rejected = filter_by_points(
+            candidates, np.zeros((0, 3)), radius=0.06)
+        self.assertEqual((len(accepted), len(rejected)), (1, 0))
+
+    def test_inflation_and_forward_margin_tighten_the_check(self):
+        # 点偏离轴线6.5cm：不加外扩时净距0.065>=0.06算通过；加上1cm体素
+        # 外扩后只剩0.055，必须判为阻挡。
+        points = np.array([[0.45, 0.065, 0.20]])
+        candidates = [{
+            "label": 0.0,
+            "start": np.array([0.4, 0.0, 0.20]),
+            "end": np.array([0.5, 0.0, 0.20]),
+        }]
+        accepted, _ = filter_by_points(candidates, points, radius=0.06)
+        self.assertEqual([item["label"] for item in accepted], [0.0])
+        accepted, rejected = filter_by_points(
+            candidates, points, radius=0.06, inflation=0.01)
+        self.assertEqual(accepted, [])
+        self.assertAlmostEqual(rejected[0]["map_clearance"], 0.055, places=9)
+
+    def test_forward_margin_extends_past_the_grasp_point(self):
+        # 瓶子后面(走廊终点之外8cm)的点，只有在走廊延展后才进入检查范围。
+        points = np.array([[0.58, 0.0, 0.20]])
+        candidates = [{
+            "label": 0.0,
+            "start": np.array([0.4, 0.0, 0.20]),
+            "end": np.array([0.5, 0.0, 0.20]),
+        }]
+        _, rejected = filter_by_points(candidates, points, radius=0.06)
+        self.assertEqual(rejected, [])
+        _, rejected = filter_by_points(
+            candidates, points, radius=0.06, forward_margin=0.04)
+        self.assertEqual(len(rejected), 1)
+        self.assertAlmostEqual(rejected[0]["map_clearance"], 0.04, places=9)
+
+    def test_sort_by_clearance_prefers_free_directions(self):
+        candidates = [
+            {"label": 0.0, "map_clearance": 0.02},
+            {"label": 15.0, "map_clearance": 0.09},
+            {"label": -15.0, "map_clearance": 0.05},
+        ]
+        self.assertEqual(
+            [item["label"] for item in sort_by_clearance(candidates)],
+            [15.0, -15.0, 0.0])
+
+    def test_sort_by_clearance_falls_back_to_semantic_clearance(self):
+        candidates = [
+            {"label": 0.0, "clearance": 0.01},
+            {"label": 30.0, "clearance": 0.20},
+        ]
+        self.assertEqual(
+            [item["label"] for item in sort_by_clearance(candidates)],
+            [30.0, 0.0])
 
 
 if __name__ == "__main__":

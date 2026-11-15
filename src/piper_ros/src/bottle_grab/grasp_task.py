@@ -21,7 +21,8 @@ import tf.transformations as tf_trans
 from moveit_msgs.msg import PlanningSceneComponents
 from moveit_msgs.srv import GetPlanningSceneRequest
 
-from grasp_corridor import filter_by_corridor
+from grasp_corridor import filter_by_corridor, filter_by_points
+from grasp_corridor import sort_by_clearance
 from joint_feedback import ARM_JOINTS
 from pose_utils import level_grasp_rotation_for_azimuth, pose_from_matrix
 from scene_manager import TARGET_BOTTLE_ID
@@ -137,7 +138,62 @@ class GraspTask:
                     "%.1f度被%s挡住(%.3fm)"
                     % (item["label"], item["blocking"], item["clearance"])
                     for item in rejected))
-        return accepted
+
+        accepted = self._reject_by_map_points(scan_result, accepted)
+        return self._limit_candidates(accepted)
+
+    def _reject_by_map_points(self, scan_result, candidates):
+        """Drop directions whose corridor is occupied by the OctoMap cloud.
+
+        ``scan_mode=map`` has no semantic boxes, so ``scan_result["obstacles"]``
+        is empty and the box corridor check above cannot reject anything.  The
+        downsampled cloud that was published into the OctoMap is the same data
+        MoveIt will collide with; checking it here turns "five candidates, each
+        timing out after ``planning_time``" into an immediate explanation.
+        """
+        points = scan_result.get("obstacle_points")
+        if points is None or len(points) == 0:
+            return candidates
+        accepted, rejected = filter_by_points(
+            candidates, points, self.config.scan_corridor_radius,
+            inflation=getattr(
+                self.config, "scan_corridor_point_inflation", 0.01),
+            forward_margin=getattr(
+                self.config, "scan_corridor_forward_margin", 0.04))
+        for item in rejected:
+            point = item["map_blocking_point"]
+            rospy.logwarn(
+                "接近方向%.1f度被地图点(%.3f,%.3f,%.3f)挡住: 净距%.3fm < %.3fm",
+                item["label"], point[0], point[1], point[2],
+                item["map_clearance"], self.config.scan_corridor_radius)
+        if accepted:
+            return accepted
+        # 走廊判据只是启发式：一个飞点不该让整个抓取任务直接放弃。
+        rospy.logwarn(
+            "所有接近方向都有地图点在走廊内；按净距排序后交给MoveIt最终裁决")
+        return sort_by_clearance(rejected)
+
+    def _limit_candidates(self, candidates):
+        """Plan only the most promising directions, most free first."""
+        limit = int(getattr(self.config, "max_grasp_candidates", 3))
+        ordered = sort_by_clearance(candidates)
+        if limit > 0 and len(ordered) > limit:
+            chosen = ordered[:limit]
+            rospy.loginfo(
+                "候选方向按走廊净距排序，只规划前%d个: %s",
+                limit, ", ".join(
+                    "%+.1f度(净距%.3fm)"
+                    % (item["label"], self._clearance_of(item))
+                    for item in chosen))
+            return chosen
+        return ordered
+
+    @staticmethod
+    def _clearance_of(candidate):
+        """Return the corridor clearance measured for this candidate."""
+        if "map_clearance" in candidate:
+            return candidate["map_clearance"]
+        return candidate.get("clearance", float("inf"))
 
     def _weighted_joint_distance(self, first, second):
         return float(np.sum(self.JOINT_WEIGHTS * np.abs(first - second)))

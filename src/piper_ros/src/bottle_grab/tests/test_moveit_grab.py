@@ -362,6 +362,40 @@ class MoveItGrabTests(unittest.TestCase):
         ctl.plan_pose_nearest(np.eye(4))
         ctl.arm.set_pose_target.assert_called_once()
 
+    def test_plan_pose_nearest_rejects_colliding_joint_goal(self):
+        """目标状态本身非法时不要等满 planning_time 再报 TIMED_OUT。"""
+        ctl, _, scene, _ = self.arm_controller()
+        ctl._limits = {}
+        ctl.arm.get_joint_value_target.return_value = [0.0] * 6
+        scene.validate_robot_state.side_effect = RuntimeError(
+            "机器人状态无效/碰撞: [('<octomap>', 'link8')]")
+        ctl.arm.plan.return_value = (True, trajectory())
+        ctl.validate_trajectory = MagicMock()
+        ctl.plan_pose_nearest(np.eye(4))
+        # 关节目标没被送去规划，只走了 pose 回退一次。
+        self.assertEqual(ctl.arm.plan.call_count, 1)
+        ctl.arm.set_pose_target.assert_called_once()
+
+    def test_plan_pose_nearest_reports_collision_when_both_fail(self):
+        ctl, _, scene, _ = self.arm_controller()
+        ctl._limits = {}
+        ctl.arm.get_joint_value_target.return_value = [0.0] * 6
+        scene.validate_robot_state.side_effect = RuntimeError(
+            "机器人状态无效/碰撞: [('<octomap>', 'link8')]")
+        ctl.arm.plan.return_value = (False, None)
+        ctl.validate_trajectory = MagicMock()
+        with self.assertRaisesRegex(RuntimeError, "link8"):
+            ctl.plan_pose_nearest(np.eye(4))
+        ctl.arm.execute.assert_not_called()
+
+    def test_clear_display_publishes_empty_trajectory(self):
+        ctl, _, _, _ = self.arm_controller()
+        ctl.display_pub = MagicMock()
+        ctl.clear_display()
+        ctl.display_pub.publish.assert_called_once()
+        published = ctl.display_pub.publish.call_args[0][0]
+        self.assertEqual(list(published.trajectory), [])
+
     def test_diagnose_cartesian_distinguishes_ik_from_collision(self):
         ctl, _, scene, _ = self.arm_controller()
         ctl._limits = {}
@@ -837,6 +871,57 @@ class MoveItGrabTests(unittest.TestCase):
         task_state.scan_result = {"obstacles": [box]}
         with self.assertRaisesRegex(RuntimeError, '没有可行的接近走廊'):
             task._candidates(pose)
+
+    def test_map_points_reject_blocked_approach_before_planning(self):
+        """scan_mode=map 没有语义盒，走廊判据必须能看地图点云。"""
+        tool = np.eye(4)
+        tool[2, 3] = 0.10
+        task, task_state, arm, gripper, scene, jf, place = self.grasp_task(
+            config={
+                "approach_yaws": [0.0, 45.0, -45.0],
+                "T_link6_tool": tool,
+                "pregrasp_distance": 0.10,
+                "grasp_height": 0.09,
+            })
+        scene.table_surface_z.return_value = 0.0966
+        pose = np.eye(4)
+        pose[:3, 3] = [0.5552, -0.0248, 0.0]
+        # 径向(0度)走廊正中间有一个地图点(瓶边的杂物)，大角度方向仍然空着。
+        task_state.scan_result = {
+            "obstacles": [],
+            "obstacle_points": np.array([[0.45, 0.0, 0.1866]]),
+        }
+        candidates = task._candidates(pose)
+        self.assertEqual([item["label"] for item in candidates], [45.0, -45.0])
+        self.assertGreater(candidates[0]["map_clearance"],
+                           candidates[1]["map_clearance"])
+
+    def test_all_directions_blocked_falls_back_to_most_free(self):
+        task, task_state, arm, gripper, scene, jf, place = self.grasp_task()
+        candidates = [
+            {"label": 0.0, "start": np.array([0.40, 0.0, 0.20]),
+             "end": np.array([0.55, 0.0, 0.20])},
+            {"label": 30.0, "start": np.array([0.44, -0.08, 0.20]),
+             "end": np.array([0.55, 0.0, 0.20])},
+        ]
+        scan_result = {
+            "obstacles": [],
+            "obstacle_points": np.array([
+                [0.47, 0.0, 0.20], [0.46, -0.03, 0.20]]),
+        }
+        accepted = task._reject_by_map_points(scan_result, candidates)
+        self.assertEqual([item["label"] for item in accepted], [30.0, 0.0])
+
+    def test_max_candidates_limits_planning_attempts(self):
+        task, task_state, arm, gripper, scene, jf, place = self.grasp_task(
+            config={"max_grasp_candidates": 1})
+        candidates = [
+            {"label": 0.0, "map_clearance": 0.02},
+            {"label": 30.0, "map_clearance": 0.20},
+            {"label": -30.0, "map_clearance": 0.10},
+        ]
+        limited = task._limit_candidates(candidates)
+        self.assertEqual([item["label"] for item in limited], [30.0])
 
     # ------------------------------------------------------------------
     # Place task workflow.

@@ -255,12 +255,20 @@ class ScanTask:
         target_pose[:3, :3] = rotation
         target_pose[:3, 3] = target_center
 
+        # 接近走廊检查用发布给OctoMap的同一份点云（已挖掉目标瓶/桌面/底座），
+        # 否则map模式下obstacles为空，走廊判据没有任何输入。
+        map_points = np.zeros((0, 3))
+        if self.map_mode and self._map_views:
+            map_points = np.vstack(
+                [entry["points_base"] for entry in self._map_views])
+
         result = {
             "table": table,
             "target_center": np.asarray(target_center, dtype=float),
             "target_pose": target_pose,
             "card": card,
             "obstacles": list(self.scene.obstacles),
+            "obstacle_points": map_points,
             "detections": detections or [],
             "points": int(len(points)),
             "views": int(fused.view_count),
@@ -277,6 +285,8 @@ class ScanTask:
             rospy.loginfo(
                 "扫描结果: 障碍地图 %d个视点快照，已冻结为静态OctoMap",
                 len(self._map_views))
+            rospy.loginfo(
+                "扫描结果: 接近走廊将用%d个地图点做净距检查", len(map_points))
         self._save(result, points, observations, images, summary)
         rospy.loginfo(
             ">>> 扫描完成: %d个视点 %d帧 %d个融合点 %d个语义障碍",

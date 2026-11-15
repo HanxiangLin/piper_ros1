@@ -147,6 +147,10 @@ class ArmController:
                 rospy.loginfo(
                     "就近IK关节目标: %s",
                     self._joint_margin_text(ARM_JOINTS, target))
+                # KDL 的解不一定无碰撞。目标状态本身非法时 OMPL 永远到不了，
+                # 只会耗尽 planning_time 后报 TIMED_OUT，把真正原因藏起来。
+                self.require_state_valid(
+                    dict(zip(ARM_JOINTS, target)), "就近IK目标")
             planned = self.unpack_plan(self.arm.plan())
             self.validate_trajectory(planned)
             return planned
@@ -165,6 +169,28 @@ class ArmController:
                 raise RuntimeError(
                     "就近IK失败(%s)，pose回退也失败(%s)"
                     % (ik_error, fallback))
+
+    def require_state_valid(self, positions, description):
+        """Raise when a joint state is already in collision.
+
+        Planning to an invalid goal can never succeed: OMPL then spends the
+        whole ``planning_time`` budget and reports ``TIMED_OUT``, which hides
+        the real reason (the goal, not the search, is the problem).
+        """
+        state = self._full_robot_state()
+        names = list(state.joint_state.name)
+        missing = [name for name in positions if name not in names]
+        if missing:
+            raise RuntimeError(
+                "%s: 规划场景缺少关节%s" % (description, missing))
+        values = list(state.joint_state.position)
+        for name, value in positions.items():
+            values[names.index(name)] = float(value)
+        state.joint_state.position = values
+        try:
+            self.scene_manager.validate_robot_state(state)
+        except RuntimeError as error:
+            raise RuntimeError("%s状态无效/碰撞: %s" % (description, error))
 
     def diagnose_cartesian(self, matrix, fraction=None, eef_step=0.003):
         """Explain why a straight-line approach was truncated.
@@ -362,6 +388,19 @@ class ArmController:
             raise RuntimeError(
                 "轨迹起点与实机状态相差 %.4f rad(%s)，拒绝执行"
                 % (deviation, worst))
+
+    def clear_display(self):
+        """Publish an empty trajectory so RViz drops the last planned path.
+
+        RViz keeps whatever ``/move_group/display_planned_path`` last carried:
+        move_group publishes every trajectory it *computes*, even the ones this
+        task rejects and never executes.  On failure that stale path is easy to
+        mistake for "the robot should be moving".
+        """
+        try:
+            self.display_pub.publish(DisplayTrajectory())
+        except Exception as error:  # noqa: BLE001 - visualization only
+            rospy.logwarn("清除RViz规划轨迹失败: %s", error)
 
     def finish_motion(self, trajectory, guarded=True):
         """Display and execute a planned trajectory.

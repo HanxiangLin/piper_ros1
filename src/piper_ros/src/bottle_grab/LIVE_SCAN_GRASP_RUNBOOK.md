@@ -435,6 +435,9 @@ $PY moveit_grab.py _params_file:=$PARAMS _dry_run:=true
 | `目标瓶在多视点融合中丢失` | 某个视点看不到瓶子：`_scan_joint1_offsets:="[0.0,0.35,-0.35]"` |
 | `物体接触区域靠近table边界` | 松手点在**已观测到的**支撑面之外（现在 footprint 以瓶子为中心 0.6m）：缩小 `_place_offset_from_card`，或把扫描视点/ROI 调到能看到卡片外侧桌面 |
 | `没有可行的接近走廊` | 日志里会写“被哪个 id 挡住、净距多少”；调 `_scan_corridor_radius:=0.04` |
+| `接近方向..度被地图点(x,y,z)挡住: 净距...` | map模式的走廊检查读的是发布给OctoMap的点云（语义盒为空）。坐标就是那簇杂物，挪走它或换 `_approach_yaw_offsets_deg`；只有全部方向都被挡时才退回“按净距排序交给MoveIt”，所以这不是致命错误 |
+| `就近IK目标状态无效/碰撞: [('<octomap>', 'link8')]` | IK解本身撞地图：指尖压在瓶边杂物上。已在规划前快速失败（不再等满 `planning_time`）；换方向、加大 `_pregrasp_distance`，或把杂物挪开 |
+| `Fail: ABORTED: TIMED_OUT` + RViz 有一条到瓶子附近的轨迹，但真机不动 | 那条轨迹是 move_group 发的规划结果（包括被否决的候选），不是执行指令。日志里没有 `>>> 执行预抓取轨迹` 就没执行；失败时程序会清掉该显示 |
 | `没有有效的预抓取/直线接近候选: ...；预抓取位..度不可达/碰撞: KDL无IK解` | 只有**预抓取规划本身**失败时才出现：14 组初值都解不出，多半是真的不可达/关节限位。换 `_approach_yaw_offsets_deg`，或考虑 B 阶段/TRAC-IK |
 | `直线接近诊断(原始0.xxx): 第N/M步发生碰撞: [('link6','table')]` | 直线段本身 IK 可达，是碰撞：按接触对检查桌面碰撞盒、瓶子 ACM、`_cartesian_joint_step_limit`，不要继续调 IK |
 | `直线接近诊断(原始0.xxx): 无碰撞复算仍只完成0.xxx，属于IK/关节限位问题` | 关掉碰撞检查也走不完：是 KDL/关节限位/奇异。先看日志里的 `余`（限位余量）；最紧的通常是 joint5。可试 `_grasp_height_from_table:=0.09` 或进入 B 阶段 |

@@ -81,6 +81,9 @@ OMPL 运动到 scan_start_joint_target
 | `scan_map_require_current_valid` | 建图后强制校验当前机械臂状态无碰撞 |
 | `scan_card_max_top_height` | 卡片簇顶离桌面高度上限，防止大ROI里的墙面板被当卡片 |
 | `scan_corridor_radius` | 接近走廊净距；小于该值的接近方向直接跳过并报出阻挡物 |
+| `scan_corridor_point_inflation` | map模式下每个地图点按半个体素外扩后再比较净距（默认 1cm） |
+| `scan_corridor_forward_margin` | 走廊终点越过抓取点再延长的距离，覆盖伸出的指尖（默认 4cm） |
+| `max_grasp_candidates` | 只为净距最大的前 N 个方向做 MoveIt 规划（默认 3） |
 | `place_offset_from_card` | 松手点距卡面中心的法向距离，默认 0.11 |
 | `home_joint_target` | 放置完成后的回零目标 |
 
@@ -115,6 +118,9 @@ YOLO 检测就近匹配；两者都分不清就直接中止，不猜。
 | `扫描未识别出卡片` | 已自动用全部视点融合点云补检仍失败。先看上方 `卡片诊断`：`ratio`/`thick` 不达标说明卡片粘连或太弯，`extent` 太小说明只露出一部分（可试 `scan_card_min_extent:=0.08`），`top` 超限说明卡片立得太斜（`scan_card_max_top_height`） |
 | `目标瓶在多视点融合中丢失` | 某个视点看不到瓶子，换 `scan_joint1_offsets` |
 | `没有可行的接近走廊` | 目标瓶被其他障碍包围；日志会给出阻挡物 id 和净距 |
+| `接近方向0.0度被地图点(0.490,0.040,0.170)挡住: 净距0.051m < 0.060m` | map模式下用发布给OctoMap的点云做走廊检查。这个坐标就是瓶边那簇真实杂物；把它挪走，或换 `approach_yaw_offsets_deg` 绕开。只有**所有**方向都被挡时才会退回“按净距排序交给MoveIt裁决” |
+| `就近IK目标状态无效/碰撞: [('<octomap>', 'link8')]` | IK解出来但目标位本身撞地图（指尖压在瓶边杂物/桌面上）。规划前就会快速失败，不再空等 `planning_time`；换方向或抬高 `grasp_height_from_table` |
+| 终端 `Fail: ABORTED: TIMED_OUT` + RViz 上有一条到瓶子附近的轨迹，但真机不动 | 这条轨迹是 move_group 通过 `/move_group/display_planned_path` 发出的**规划结果**（含被本程序否决、从未执行的候选），RViz 不清屏就一直留着。程序只在 `>>> 执行预抓取轨迹` 之后才真正下发指令；失败时会主动清掉该显示。日志里没有这行就说明没执行 |
 | `环境/规划场景在任务中改变` | 有人动了场景、或遗留扫描门又在发点云 |
 
 ## 7. 已知边界（本次明确的取舍）
